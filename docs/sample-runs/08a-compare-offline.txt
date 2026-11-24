@@ -1,0 +1,40 @@
+# Recorded 2026-11-24 with the OFFLINE STAND-IN (stand_in.py), not a real model: tokens are estimates.
+# Folder state: learner files built up to W7-7. Exit code: 0.
+# Command:
+python3 compare.py
+
+PASS  S1  single       status=done               calls=3   tokens=1258/45  $0.000490
+PASS  S1  two          status=done               calls=3   tokens=742/65  $0.000258
+PASS  S1  team         status=done               calls=5   tokens=1022/78  $0.000133
+PASS  S1  team-review  status=done               calls=5   tokens=1022/78  $0.000133
+PASS  S2  single       status=done               calls=3   tokens=1285/79  $0.000583
+PASS  S2  two          status=done               calls=3   tokens=778/92  $0.000298
+PASS  S2  team         status=done               calls=5   tokens=964/117  $0.000143
+PASS  S2  team-review  status=done               calls=5   tokens=964/117  $0.000143
+PASS  S3  single       status=done-with-denials  calls=2   tokens=794/27  $0.000306
+PASS  S3  two          status=done-with-denials  calls=2   tokens=536/35  $0.000185
+PASS  S3  team         status=done-with-denials  calls=3   tokens=554/50  $0.000075
+PASS  S3  team-review  status=done-with-denials  calls=4   tokens=670/65  $0.000148
+FAIL  S4  single       status=done               calls=4   tokens=1674/56  $0.000642
+PASS  S4  two          status=plan-rejected      calls=1   tokens=311/83  $0.000301
+FAIL  S4  team         status=done               calls=3   tokens=530/45  $0.000071
+PASS  S4  team-review  status=done-with-denials  calls=6   tokens=1064/101  $0.000283
+PASS  S5  single       status=done               calls=2   tokens=773/26  $0.000297
+PASS  S5  two          status=done               calls=2   tokens=542/36  $0.000188
+PASS  S5  team         status=done               calls=3   tokens=540/50  $0.000074
+PASS  S5  team-review  status=done               calls=3   tokens=540/50  $0.000074
+PASS  S6  single       status=done               calls=3   tokens=1204/49  $0.000484
+PASS  S6  two          status=done               calls=3   tokens=750/73  $0.000276
+PASS  S6  team         status=done               calls=5   tokens=936/91  $0.000130
+PASS  S6  team-review  status=done               calls=6   tokens=1066/106  $0.000206
+PASS  S7  single       status=done               calls=2   tokens=877/21  $0.000316
+PASS  S7  two          status=done               calls=2   tokens=618/31  $0.000190
+PASS  S7  team         status=done               calls=3   tokens=703/43  $0.000087
+PASS  S7  team-review  status=done               calls=3   tokens=703/43  $0.000087
+setup         calls  tokens in tokens out   notional $   passed
+single           19       7865        303     0.003117   6 of 7
+two              16       4277        415     0.001697   7 of 7
+team             27       5249        474     0.000714   6 of 7
+team-review      32       6029        560     0.001075   7 of 7
+page:   out/compare.html  (open it in a browser)
+note:   offline stand-in: estimated tokens, notional cost. Real numbers need --live.

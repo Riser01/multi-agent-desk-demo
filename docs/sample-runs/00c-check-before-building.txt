@@ -1,0 +1,14 @@
+# Recorded 2026-11-24 with the OFFLINE STAND-IN (stand_in.py), not a real model: tokens are estimates.
+# Folder state: nothing built yet (only provided files). Exit code: 1.
+# Command:
+python3 check.py
+
+Setup   provided files: all 24 green
+Phase W7-1  State and one agent node: not built yet (state.py does not exist)
+Phase W7-2  Planner and executor: not built yet (handoff.py does not exist)
+Phase W7-3  Break the handoff and cap it: not built yet (handoff.py does not exist)
+Phase W7-4  Supervisor and workers: not built yet (supervisor.py does not exist)
+Phase W7-6  Reviewer on risky actions: not built yet (reviewer.py does not exist)
+Phase W7-7  Cost meter and version stamp: not built yet (prod.py does not exist)
+Phase W7-8  The comparison (provided; runs your graphs): not built yet (graph.py does not exist)
+Style   comment standard: ok (0 files checked)

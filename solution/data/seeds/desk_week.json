@@ -1,0 +1,42 @@
+{
+ "next_id": 9,
+ "tasks": [
+  {
+   "id": 1,
+   "text": "Mon 23 Nov: renew car insurance"
+  },
+  {
+   "id": 2,
+   "text": "Pay rent"
+  },
+  {
+   "id": 3,
+   "text": "Wed 25 Nov: prepare slides for team sync"
+  },
+  {
+   "id": 4,
+   "text": "Book dentist appointment"
+  },
+  {
+   "id": 5,
+   "text": "Thu 26 Nov: call the plumber about the kitchen tap"
+  },
+  {
+   "id": 6,
+   "text": "Fri 27 Nov: buy a birthday gift for Anil"
+  }
+ ],
+ "events": [
+  {
+   "id": 7,
+   "when": "Wed 25 Nov 15:00",
+   "title": "Team sync"
+  },
+  {
+   "id": 8,
+   "when": "Fri 27 Nov 18:00",
+   "title": "Birthday dinner for Anil"
+  }
+ ],
+ "notes": []
+}

@@ -1,0 +1,10 @@
+# Recorded 2026-11-24 with the OFFLINE STAND-IN (stand_in.py), not a real model: tokens are estimates.
+# Folder state: learner files built up to W7-7. Exit code: 0.
+# Command:
+python3 extras/fanout.py --delay 0.5 --quiet
+
+status: done
+results: 2
+seconds: 1.08 (includes SIMULATED latency)
+  calendar: Add a dentist appointment on Fri 27 Nov 10:00 -> ok: added event 9
+  tasks: add a task to buy a gift for Anil -> ok: added task 10

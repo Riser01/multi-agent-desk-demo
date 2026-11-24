@@ -1,0 +1,12 @@
+# Recorded 2026-11-24 with the OFFLINE STAND-IN (stand_in.py), not a real model: tokens are estimates.
+# Folder state: learner files built up to W7-7. Exit code: 0.
+# Command:
+python3 extras/canary.py --rollback --users 5
+
+rollback: canary_percent = 0, every user is on stable 1.0.0
+user-001  bucket 87  ->  stable (1.0.0)
+user-002  bucket 42  ->  stable (1.0.0)
+user-003  bucket 50  ->  stable (1.0.0)
+user-004  bucket 28  ->  stable (1.0.0)
+user-005  bucket 59  ->  stable (1.0.0)
+canary share: 0 of 5 users (target 0%)

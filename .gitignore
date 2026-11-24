@@ -1,0 +1,14 @@
+# secrets: never committed
+.env
+# run outputs: every run writes these
+logs/
+out/
+# local Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+# written by extras/canary.py --set / --rollback
+data/rollout.json
+# build notes, not part of the course repo
+BUILD-STATUS.md

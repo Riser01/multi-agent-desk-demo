@@ -1,0 +1,5 @@
+# Python 3.11 or newer.
+langgraph==1.2.23
+# Only for --live runs (the real Gemini model). Offline runs and every check work without it.
+google-genai==3.6.1
+# Optional trace viewer, not installed by default:  pip install "langfuse==5.2.0"

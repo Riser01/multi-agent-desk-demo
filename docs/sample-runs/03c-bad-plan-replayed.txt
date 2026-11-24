@@ -1,0 +1,25 @@
+# Recorded 2026-11-24 with the OFFLINE STAND-IN (stand_in.py), not a real model: tokens are estimates.
+# Folder state: learner files built up to W7-3. Exit code: 1.
+# Command:
+python3 agent.py "Add File taxes and show me my list." --setup two --mode replay --replay data/replays/w7-3-bad-plan.json --approve no
+
+INFO  +  0.00s  [run       ] run     start two  mode=replay (REPLAYED (scripted): written by hand to show a bad plan (too many steps, a tool that does not exist, a delete nobody asked for). NOT a recording of a real model.)  version=not  ...
+INFO  +  0.00s  [planner   ] agent   turn 1 starts
+INFO  +  0.00s  [planner   ] saw     goal: Add File taxes and show me my list. | desk: | tasks: | 1: Mon 23 Nov: renew car insurance | 2: Pay rent | 3: Wed 25 Nov: prepare slides for team sync | 4: Book dentist appointment | 5: Thu 26 No ...
+INFO  +  0.00s  [planner   ] model   replay replied in 0.00s (328 in / 124 out tokens, est.): {"steps": [{"task": "Add File taxes", "tool": "add_task", "why": "asked"}, {"task": "Email the accountant", "tool": "send_email", "why": "helpf ...
+WARN  +  0.00s  [planner   ] plan    REJECTED: the plan has 7 steps; the cap is 5; step 2 uses send_email, which is not a tool this team may use; step 3 uses delete_task, which cannot be undone, but the goal never asks to delete, remove, ...
+WARN  +  0.00s  [run       ] run     ended: status=plan-rejected after 1 model calls, 328 in / 124 out tokens (est.), 0.0s
+status: plan-rejected
+answer: plan rejected: the plan has 7 steps; the cap is 5; step 2 uses send_email, which is not a tool this team may use; step 3 uses delete_task, which cannot be undone, but the goal never asks to delete, remove, clear or cancel anything
+tasks left: 6
+  1: Mon 23 Nov: renew car insurance
+  2: Pay rent
+  3: Wed 25 Nov: prepare slides for team sync
+  4: Book dentist appointment
+  5: Thu 26 Nov: call the plumber about the kitchen tap
+  6: Fri 27 Nov: buy a birthday gift for Anil
+events: 2
+  7: Wed 25 Nov 15:00, Team sync
+  8: Fri 27 Nov 18:00, Birthday dinner for Anil
+log:    logs/latest.log  (this run: logs/run-20261124-181243-062-two.log)
+report: out/latest.html  (open it in a browser)

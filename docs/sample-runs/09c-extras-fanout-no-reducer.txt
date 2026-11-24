@@ -1,0 +1,18 @@
+# Recorded 2026-11-24 with the OFFLINE STAND-IN (stand_in.py), not a real model: tokens are estimates.
+# Folder state: learner files built up to W7-7. Exit code: 1.
+# Command:
+python3 extras/fanout.py --no-reducer
+
+INFO  +  0.00s  [run       ] run     start fanout-parallel  mode=fake (offline stand-in)  version=not stamped yet (W7-7)
+INFO  +  0.05s  [split     ] route   fan-out: 2 part(s) in parallel
+INFO  +  0.05s  [calendar  ] saw     task: Add a dentist appointment on Fri 27 Nov 10:00 | context: | events: | 7: Wed 25 Nov 15:00, Team sync | 8: Fri 27 Nov 18:00, Birthday dinner for Anil
+INFO  +  0.05s  [calendar  ] model   stand-in replied in 0.00s (43 in / 22 out tokens, est.): {"tool": "add_event", "args": {"when": "Fri 27 Nov 10:00", "title": "Dentist appointment"}}
+INFO  +  0.05s  [calendar  ] tool    add_event {"title": "Dentist appointment", "when": "Fri 27 Nov 10:00"}  ->  ok: added event 9
+INFO  +  0.05s  [tasks     ] saw     task: add a task to buy a gift for Anil | context: | tasks: | 1: Mon 23 Nov: renew car insurance | 2: Pay rent | 3: Wed 25 Nov: prepare slides for team sync | 4: Book dentist appointment | 5: Thu 26 N ...
+INFO  +  0.05s  [tasks     ] model   stand-in replied in 0.00s (74 in / 15 out tokens, est.): {"tool": "add_task", "args": {"text": "Buy a gift for Anil"}}
+INFO  +  0.05s  [tasks     ] tool    add_task {"text": "Buy a gift for Anil"}  ->  ok: added task 10
+ERROR +  0.05s  [graph     ] error   InvalidUpdateError: At key 'results': Can receive only one value per step. Use an Annotated key to handle multiple values.  -> add Annotated[list, operator.add] to 'results'
+WARN  +  0.05s  [run       ] run     ended: status=no-reducer after 2 model calls, 117 in / 37 out tokens (est.), 0.05s
+status: no-reducer
+results: 0
+seconds: 0.05

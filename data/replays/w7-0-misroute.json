@@ -1,0 +1,18 @@
+{
+ "label": "written by hand to show a known failure shape (with twelve similar tools the agent picks delete_task for an 'archive' request, then claims success). NOT a recording of a real model. Record your own with: python3 baseline.py \"Archive the dentist task.\" --live --record data/replays/my-baseline.json",
+ "kind": "scripted",
+ "replies": [
+  {
+   "role": "agent",
+   "text": "{\"tool\": \"list_tasks\", \"args\": {}}"
+  },
+  {
+   "role": "agent",
+   "text": "{\"tool\": \"delete_task\", \"args\": {\"id\": 4}}"
+  },
+  {
+   "role": "agent",
+   "text": "{\"final\": \"Done: the dentist task is archived.\"}"
+  }
+ ]
+}
