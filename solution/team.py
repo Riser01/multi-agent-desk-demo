@@ -111,6 +111,17 @@ def run_team(goal: str, desk: desk_mod.Desk, model, approve, *, review: bool = F
         nxt = route.get("next", "finish")
         if nxt not in ("tasks", "calendar", "finish"):
             nxt = "finish"   # an unknown route from a live model ends the turn instead of crashing the graph
+        was_refused = any(
+            line.startswith(f"{nxt}:") and ("denied" in line or "blocked by reviewer" in line)
+            for line in (state.get("done_so_far") or [])
+        )
+        if nxt != "finish" and was_refused:
+            # A human "no" (or a reviewer block) is final for that worker. A live model often routes the same delete
+            # to the same worker again; asking a person twice is how a team nags. Code ends the run instead. The
+            # other worker is still free to run, so an unrelated second job is not lost.
+            if log_fn:
+                log_fn(f"WARN  [supervisor] {nxt} was already refused; not asking again")
+            nxt = "finish"
         if log_fn:
             log_fn(f"INFO  [supervisor] -> {nxt}: {route.get('task') or route.get('answer', '')}")
         return {

@@ -200,6 +200,29 @@ class StandIn:
         )
 
 
+LIVE_TOOL_ROLES = {"single": "ALL_TOOLS", "planner": "ALL_TOOLS", "tasks": "TASK_TOOLS", "calendar": "CALENDAR_TOOLS",
+                   "tasks_worker": "TASK_TOOLS", "calendar_worker": "CALENDAR_TOOLS"}
+
+
+def live_system(role: str, system: str) -> str:
+    """For --live only: tell a REAL model the exact tool and argument names (the offline stand-in never needs this).
+
+    WHY: the phase prompts name the tools, but a real model has to guess the argument names (title? text?) and a wrong
+    guess is refused by the tool check. This block is added after the phase's own prompt, only for live calls, so the
+    offline token counts quoted in the guide stay exactly the same.
+    """
+    names_attr = LIVE_TOOL_ROLES.get(role)
+    if not names_attr:
+        return system
+    import desk
+    names = getattr(desk, names_attr)
+    menu = "\n".join(f"- {n}: {desk.TOOL_META[n][1]}" for n in names)
+    return (
+        f"{system}\n\nTool menu (use exactly these tool names and argument names; ids are numbers; "
+        f"reply with ONE JSON object and nothing else):\n{menu}"
+    )
+
+
 class GeminiModel:
     """Opt-in live Gemini adapter with 429/503 exponential backoff."""
     label = "live Gemini"
@@ -223,7 +246,7 @@ class GeminiModel:
             try:
                 resp = self.client.models.generate_content(
                     model=chosen,
-                    contents=f"{system}\n\n{user}",
+                    contents=f"{live_system(role, system)}\n\n{user}",
                 )
                 text = getattr(resp, "text", "") or ""
                 usage = getattr(resp, "usage_metadata", None)

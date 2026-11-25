@@ -10,7 +10,7 @@ Claude Code, Copilot or Windsurf work too), then test it live in an **interactiv
 deliberately gullible on the `/drill` attack so you can watch your safety code work). The stand-in is **not a real
 model**: every log, `logs/runs.jsonl` row and `out/latest.html` says `offline stand-in (not a real model)`, its token
 counts are estimates, and every cost is notional (list price). Pass `--live` with your own free Gemini key in `.env`
-for real model calls.
+for real model calls (a free key allows only a few live runs a day: see `GUIDE.md` Step 8).
 
 **Needs Python 3.11 or newer** and one package: `langgraph==1.2.23`.
 

@@ -47,13 +47,21 @@ class Phase3Tests(unittest.TestCase):
         self.assertIn("not allowed", " ".join(res.get("done_so_far") or []) + res.get("answer", ""))
 
     def test_supervisor_turn_cap_stops_a_loop(self):
-        """PM-1a: a supervisor that never says finish is stopped after MAX_TURNS (6) model calls with status 'stopped'."""
+        """PM-1a: a supervisor that never says finish is stopped after MAX_TURNS (6) calls; a denied delete is not asked again."""
         self.assertEqual(team.MAX_TURNS, 6)
         model = ScriptedModel({"supervisor": {"next": "tasks", "task": "list my tasks"},
                                "tasks_worker": {"tool": "list_tasks", "args": {}}})
         res = team.run_team("Show my list.", desk_mod.load_desk(SEED), model, desk_mod.approve_no)
         self.assertEqual(res["status"], "stopped")
         self.assertEqual(model.count("supervisor"), team.MAX_TURNS)
+        # A human "no" is final for that worker: a supervisor that keeps re-routing the same denied delete is stopped.
+        model2 = ScriptedModel({"supervisor": {"next": "tasks", "task": "delete the dentist task"},
+                                "tasks_worker": {"tool": "delete_task", "args": {"id": 3}}})
+        d2 = desk_mod.load_desk(SEED)
+        res2 = team.run_team("Delete the dentist task.", d2, model2, desk_mod.approve_no)
+        self.assertEqual(res2["status"], "done-with-denials")
+        self.assertEqual(model2.count("tasks_worker"), 1, "a denied delete must not be asked again")
+        self.assertTrue(any(t["id"] == 3 for t in d2.tasks))
 
     def test_graph_invoke_passes_a_small_recursion_limit(self):
         """PM-1a: compiled.invoke(...) gets config={"recursion_limit": N} with a small N (LangGraph's default is 10007)."""

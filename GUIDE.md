@@ -105,7 +105,7 @@ Read AGENTS.md first and follow its rules. Do not edit provided files or tests. 
 ```
 
 ### Step 8 (optional). `.env` for `--live` or `--export langfuse`
-Skip this unless you want real Gemini calls (`--live`) or the Langfuse trace viewer. Copy the example file:
+Skip this unless you want real Gemini calls (`--live`) or the Langfuse trace viewer. On 25 Nov 2026 one free key allowed only 20 requests per model per day (limits change; see the rate-limits page). A team run makes 5 to 16 model calls, so a free key supports a few live runs a day, not a whole class: when you see `429 RESOURCE_EXHAUSTED ... per day`, wait or use the offline stand-in, which never runs out. Copy the example file:
 - Mac: `cp .env.example .env`, then `open -e .env`
 - Windows `cmd`: `copy .env.example .env`, then `notepad .env`
 
