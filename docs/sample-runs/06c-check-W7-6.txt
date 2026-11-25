@@ -1,6 +1,0 @@
-# Recorded 2026-11-24 with the OFFLINE STAND-IN (stand_in.py), not a real model: tokens are estimates.
-# Folder state: learner files built up to W7-6. Exit code: 0.
-# Command:
-python3 check.py 6
-
-Phase W7-6  Reviewer on risky actions: all 11 green

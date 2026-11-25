@@ -1,6 +1,0 @@
-# Recorded 2026-11-24 with the OFFLINE STAND-IN (stand_in.py), not a real model: tokens are estimates.
-# Folder state: learner files built up to W7-4. Exit code: 0.
-# Command:
-python3 check.py 4
-
-Phase W7-4  Supervisor and workers: all 7 green

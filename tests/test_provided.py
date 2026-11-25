@@ -1,312 +1,243 @@
-"""Checks on the PROVIDED files (config, llm, stand_in, desk_tools, gate, obs, baseline, data). They should always be green.
-
-These run with the standard library only, offline, before you build anything. If one fails, a provided file was
-changed or a data file was damaged: do not edit the provided files, get a fresh copy.
-"""
+"""Tests for provided plumbing: Desk, gate, todo-list.md, sessions/, /drill, /monitor, honest labels, trace export, single."""
+import io
 import json
 import os
+import sys
 import tempfile
+import types
 import unittest
-from types import SimpleNamespace
-from unittest.mock import patch
+from unittest import mock
 
-from fakes import ROOT, call, desk_with, quiet_run, seed
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
-import desk_tools
-import gate
+import app
+import desk as desk_mod
 import llm
-import obs
+from fakes import ScriptedModel
+
+SEED = os.path.join(ROOT, "data", "seed.json")
 
 
-class Provided(unittest.TestCase):
-    # ---- config.py ----
-    def test_env_file_fills_missing_keys_but_never_overrides_the_shell(self):
-        """config.load_env reads KEY=VALUE lines, ignores blanks and comments, lets your shell win, and returns names only."""
-        import config
-        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"A_SHELL": "shell"}, clear=True):
-            path = os.path.join(folder, ".env")
-            with open(path, "w") as handle:
-                handle.write("# comment\nA_SHELL=file\nNEW_KEY='value'\nEMPTY=\n")
-            names = config.load_env(path)
-            self.assertEqual(names, ["NEW_KEY"])
-            self.assertEqual(os.environ["A_SHELL"], "shell")
-            self.assertNotIn("EMPTY", os.environ)
+class ProvidedTests(unittest.TestCase):
+    def test_delete_gate_defaults_to_deny_and_enforces_allow_list(self):
+        """Irreversible tools require explicit yes; blank/EOF defaults to deny; unknown/disallowed tools are refused."""
+        d = desk_mod.load_desk(SEED)
+        res_denied = desk_mod.run_tool("delete_task", {"id": 1}, d, allowed=desk_mod.TASK_TOOLS, approve=desk_mod.approve_no)
+        self.assertEqual(res_denied.kind, "denied")
+        self.assertTrue(any(t["id"] == 1 for t in d.tasks))
+        res_refused = desk_mod.run_tool("cancel_event", {"id": 6}, d, allowed=desk_mod.TASK_TOOLS, approve=desk_mod.approve_yes)
+        self.assertEqual(res_refused.kind, "refused")
 
-    # ---- llm.py ----
-    def test_fake_model_replays_per_role_and_records_what_each_agent_saw(self):
-        """FakeModel replays scripted replies per role (the last one repeats) and records every message it was sent."""
-        model = llm.FakeModel({"planner": [{"steps": []}], "executor": [call("list_tasks"), {"final": "x"}]})
-        self.assertEqual(json.loads(model("executor", "s", "u1").text), call("list_tasks"))
-        model("executor", "s", "u2")
-        self.assertEqual(json.loads(model("executor", "s", "u3").text), {"final": "x"})
-        self.assertEqual([c["user"] for c in model.calls], ["u1", "u2", "u3"])
-        self.assertTrue(model("planner", "s", "u").estimated)
+    def test_session_sanitization_and_save_load_latest_copy(self):
+        """Session names block traversal/reserved 'latest'; save_session writes latest.json as a real copy and todo-list.md."""
+        for bad in ("", "../x", "a/b", "a\\b", "bad:id", "latest", "a" * 65):
+            with self.assertRaises(ValueError):
+                desk_mod.validate_session_id(bad)
+        d = desk_mod.load_desk(SEED)
+        with tempfile.TemporaryDirectory() as tmp:
+            saved = desk_mod.save_session(tmp, {"id": "demo1", "setup": "single", "desk": d, "turns": 1})
+            latest = os.path.join(tmp, "sessions", "latest.json")
+            self.assertTrue(os.path.isfile(saved) and os.path.isfile(latest) and not os.path.islink(latest))
+            loaded = desk_mod.load_session(tmp, "latest")
+            self.assertEqual(loaded["id"], "demo1")
+            md = desk_mod.write_todo_file(tmp, d, session_id="demo1", setup="single", turns=1,
+                                          session_cost=0.0, cost_available=False, mode="fake")
+            self.assertIn("- [ ] `#1` Pay rent", open(md, encoding="utf-8").read())
 
-    def test_call_cap_stops_a_run_before_one_call_too_many(self):
-        """Capped refuses the call after max_calls with CallCapReached, so a looping team cannot burn the quota."""
-        capped = llm.Capped(llm.FakeModel({"x": ["{}"]}), max_calls=2)
-        capped("x", "", "")
-        capped("x", "", "")
-        with self.assertRaises(llm.CallCapReached):
-            capped("x", "", "")
+    def test_drill_is_idempotent_and_monitor_handles_empty_logs(self):
+        """/drill attaches one note without duplicating; /monitor prints a friendly message when no logs exist."""
+        d = desk_mod.load_desk(SEED)
+        n1 = desk_mod.inject_drill_note(d)
+        n2 = desk_mod.inject_drill_note(d)
+        self.assertEqual(n1["id"], n2["id"])
+        lines = []
+        with tempfile.TemporaryDirectory() as tmp:
+            app.run_monitor(desk_mod.Path(tmp), lines.append)
+        self.assertIn("No runs logged yet", "\n".join(lines))
 
-    def test_ask_json_logs_what_the_agent_saw_and_reasks_once_on_bad_json(self):
-        """ask_json logs a 'saw' and a 'model' event, re-asks once on bad JSON, and raises ModelError the second time."""
-        run = quiet_run()
-        data, _ = llm.ask_json(llm.FakeModel({"r": ["not json", '{"ok": 1}']}), "r", "sys", "hello", run=run)
-        self.assertEqual(data, {"ok": 1})
-        self.assertEqual(run.totals["calls"], 2)
-        self.assertTrue(any(e["kind"] == "model" and e["level"] == "WARN" for e in run.events))
-        with self.assertRaises(llm.ModelError):
-            llm.ask_json(llm.FakeModel({"r": ["nope"]}), "r", "sys", "hello")
+    def test_interactive_chat_works_out_of_box_with_builtin_single_and_autosaves(self):
+        """python app.py works before AM-1 via built-in single, updates todo-list.md, and auto-saves on /quit."""
+        cmds = iter(["Add Buy milk", "/desk", "/save test1", "/quit"])
+        lines = []
+        with tempfile.TemporaryDirectory() as tmp:
+            code = app.main(["--seed", SEED, "--approve", "no", "--quiet"],
+                            input_fn=lambda _: next(cmds), out=lines.append, root=tmp)
+            self.assertEqual(code, 0)
+            self.assertIn("Saved desk & chat", "\n".join(lines))
+            self.assertIn("Buy milk", open(os.path.join(tmp, "todo-list.md"), encoding="utf-8").read())
+            loaded = desk_mod.load_session(tmp, "test1")
+            self.assertEqual(loaded["turns"], 1)
 
-    def test_ask_json_charges_the_meter_and_the_meter_can_stop_the_run(self):
-        """ask_json calls meter.charge() for every reply, logs the cost, then meter.check(), which may stop the run."""
-        class Meter:
-            """A stand-in meter that stops after the first charge."""
-            total_usd, price_date = 0.0, "test"
 
-            def charge(self, role, reply):
-                """Add a fixed cost."""
-                self.total_usd += 1.0
-                return 1.0
+class ProvidedSafetyAndLabelTests(unittest.TestCase):
+    def test_terminal_gate_blank_or_eof_means_no(self):
+        """The [y/N] gate approves only on y/yes; blank, other text and EOF (closed input) all mean NO."""
+        def ask_with(answer):
+            def fake_input(_prompt):
+                if answer is EOFError:
+                    raise EOFError
+                return answer
+            return desk_mod.make_ask(fake_input, lambda _: None)("delete_task", {"id": 1}, "delete task #1")
+        for no in ("", "   ", "n", "no", "maybe", EOFError):
+            self.assertFalse(ask_with(no), f"answer {no!r} must deny")
+        for yes in ("y", "Y", "yes", " YES "):
+            self.assertTrue(ask_with(yes), f"answer {yes!r} must approve")
 
-            def check(self):
-                """Always over the ceiling."""
-                raise llm.CostCeilingReached("over")
-        run = quiet_run()
-        with self.assertRaises(llm.CostCeilingReached):
-            llm.ask_json(llm.FakeModel({"r": ['{"a": 1}']}), "r", "s", "u", run=run, meter=Meter())
-        self.assertEqual(run.events[-1]["kind"], "cost")
+    def test_windows_reserved_session_names_rejected(self):
+        """Session names Windows cannot save (con, nul, prn, aux, com1-9, lpt1-9) are rejected on every OS."""
+        for bad in ("con", "CON", "nul", "prn", "aux", "com1", "COM9", "lpt1", "Lpt9"):
+            with self.assertRaises(ValueError):
+                desk_mod.validate_session_id(bad)
+        for ok in ("console", "com10", "nully", "demo-1"):
+            self.assertEqual(desk_mod.validate_session_id(ok), ok)
 
-    def test_replay_files_are_labelled_and_running_out_is_an_error(self):
-        """A replay file says REPLAYED and whether it was scripted or recorded; running out of replies is a ModelError."""
-        model = llm.ReplayModel(os.path.join(ROOT, "data", "replays", "w7-0-misroute.json"))
-        self.assertIn("REPLAYED (scripted)", model.label)
-        for _ in range(3):
-            model("agent", "s", "u")
-        with self.assertRaises(llm.ModelError):
-            model("agent", "s", "u")
+    def test_corrupt_session_files_are_reported_not_crashed(self):
+        """Damaged sessions (turns null, events not a list, bad history or seed) raise a clear ValueError; --resume exits 2."""
+        good = desk_mod.desk_to_dict(desk_mod.load_desk(SEED))
+        damaged = {
+            "turns_null": {"id": "turns_null", "desk": good, "turns": None},
+            "events_int": {"id": "events_int", "desk": {**good, "events": 5}},
+            "history_int": {"id": "history_int", "desk": good, "history": 3},
+            "seed_bad": {"id": "seed_bad", "desk": good, "seed": "/etc/passwd"},
+            "seed_type": {"id": "seed_type", "desk": good, "seed": 42},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "sessions"))
+            for name, data in damaged.items():
+                with open(os.path.join(tmp, "sessions", f"{name}.json"), "w", encoding="utf-8") as fh:
+                    json.dump(data, fh)
+                with self.assertRaises(ValueError, msg=name):
+                    desk_mod.load_session(tmp, name)
+            lines = []
+            code = app.main(["--resume", "turns_null", "--quiet"], input_fn=lambda _: "/quit", out=lines.append, root=tmp)
+            self.assertEqual(code, 2)
+            self.assertIn("configuration error", "\n".join(lines))
+        for kind in ("tasks", "events", "notes"):
+            with self.assertRaises(ValueError, msg=kind):
+                desk_mod.desk_from_dict({**good, kind: 5})
 
-    def test_live_mode_without_a_key_fails_in_plain_words(self):
-        """--live with no GEMINI_API_KEY stops at once with a plain message that names .env, never a traceback."""
-        with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaises(llm.ModelError) as caught:
-                llm.make_model("live")
-        self.assertIn(".env", str(caught.exception))
+    def test_offline_outputs_say_stand_in_not_a_real_model(self):
+        """logs/latest.log, runs.jsonl and out/latest.html say 'offline stand-in (not a real model)'; no Gemini model name."""
+        with tempfile.TemporaryDirectory() as tmp:
+            code = app.main(["Add Buy milk", "--seed", SEED, "--approve", "no", "--quiet"],
+                            input_fn=lambda _: "", out=lambda _: None, root=tmp)
+            self.assertEqual(code, 0)
+            log = open(os.path.join(tmp, "logs", "latest.log"), encoding="utf-8").read()
+            row = json.loads(open(os.path.join(tmp, "logs", "runs.jsonl"), encoding="utf-8").read().splitlines()[-1])
+            page = open(os.path.join(tmp, "out", "latest.html"), encoding="utf-8").read()
+            for text in (log, row["mode"], page):
+                self.assertIn("offline stand-in (not a real model)", text)
+            self.assertIn("model=stand-in", log)
+            self.assertNotIn("model=gemini", log)
 
-    def test_live_adapter_waits_out_a_429_and_never_prints_the_key(self):
-        """GeminiModel retries a 429 with a pause, then succeeds; usage comes from the provider; the key is never in errors."""
-        try:
-            from google.genai import errors
-        except ImportError:
-            self.skipTest("google-genai is not installed (only live runs need it)")
-        replies = [errors.APIError(429, {"error": {"code": 429}}),
-                   SimpleNamespace(text='{"final": "ok"}', usage_metadata=SimpleNamespace(prompt_token_count=40, candidates_token_count=5))]
+    def test_monitor_shows_na_when_cost_was_not_metered(self):
+        """/monitor prints cost n/a (not $0.000000) for runs logged before prod.py existed, and skips broken lines."""
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "logs"))
+            with open(os.path.join(tmp, "logs", "runs.jsonl"), "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"setup": "single", "status": "done", "cost_usd": None}) + "\n{broken\n")
+            lines = []
+            app.run_monitor(desk_mod.Path(tmp), lines.append)
+        text = "\n".join(lines)
+        self.assertIn("n/a", text)
+        self.assertNotIn("$0.000000", text)
 
-        def fake_generate(**_kwargs):
-            """Fail once with 429, then answer."""
-            item = replies.pop(0)
-            if isinstance(item, Exception):
-                raise item
-            return item
-        with patch.dict(os.environ, {"GEMINI_API_KEY": "KEY-SECRET-123"}, clear=True), patch("time.sleep") as slept:
-            model = llm.GeminiModel()
-            model.client = SimpleNamespace(models=SimpleNamespace(generate_content=fake_generate))
-            reply = model("agent", "sys", "user")
-            self.assertEqual((reply.input_tokens, reply.output_tokens, reply.estimated), (40, 5, False))
-            self.assertTrue(slept.called)
-            model.client = SimpleNamespace(models=SimpleNamespace(generate_content=lambda **k: (_ for _ in ()).throw(errors.APIError(403, {}))))
-            with self.assertRaises(llm.ModelError) as caught:
-                model("agent", "sys", "user")
-            self.assertNotIn("KEY-SECRET-123", str(caught.exception))
 
-    # ---- desk_tools.py ----
-    def test_every_seed_loads_and_a_damaged_desk_is_refused(self):
-        """All seed files load; a desk with a repeated id or a too-low next_id raises ValueError instead of guessing."""
-        for name in ("desk_week", "trap", "long_note"):
-            self.assertTrue(desk_tools.load_desk(seed(name)).tasks)
-        with self.assertRaises(ValueError):
-            desk_tools.desk_from_dict({"next_id": 3, "tasks": [{"id": 1, "text": "a"}, {"id": 1, "text": "b"}]})
-        with self.assertRaises(ValueError):
-            desk_tools.desk_from_dict({"next_id": 1, "tasks": [{"id": 1, "text": "a"}]})
+class _RecorderObservation:
+    def __init__(self, log, name, as_type):
+        self.log, self.name, self.as_type = log, name, as_type
 
-    def test_twelve_tools_with_risk_tiers_in_code(self):
-        """There are twelve tools; delete_task, clear_done and cancel_event are irreversible; workers get short lists."""
-        self.assertEqual(len(desk_tools.ALL_TOOLS), 12)
-        self.assertEqual(sorted(n for n, t in desk_tools.TOOLS.items() if t.risk == "irreversible"),
-                         ["cancel_event", "clear_done", "delete_task"])
-        self.assertTrue(set(desk_tools.TASK_TOOLS).isdisjoint(desk_tools.CALENDAR_TOOLS))
+    def update(self, **kwargs):
+        self.log.append(("update", self.name, self.as_type, kwargs))
 
-    def test_views_cut_each_item_so_ids_stay_visible(self):
-        """desk_view and list_tasks cut each item to 100 characters, so a huge note cannot hide the other ids."""
-        desk = desk_tools.load_desk(seed("long_note"))
-        view = desk_tools.desk_view(desk)
-        self.assertLess(len(view), 1500)
-        self.assertIn("7: ", view)
-        self.assertGreater(len(desk_tools.desk_view(desk, preview=None)), 1500)
+    def __enter__(self):
+        return self
 
-    # ---- gate.py ----
-    def test_gate_allow_list_input_check_and_default_deny(self):
-        """The gate refuses a tool not on the agent's list, bad input and an unknown tool, and denies with no approver."""
-        desk = desk_with("Pay rent")
-        self.assertIn("not allowed", gate.run_tool("delete_task", {"id": 1}, desk, allowed=["list_tasks"], approve=gate.approve_yes, actor="x").text)
-        self.assertEqual(gate.run_tool("delete_task", {"id": True}, desk, allowed=["delete_task"], approve=gate.approve_yes, actor="x").kind, "error")
-        self.assertEqual(gate.run_tool("delete_task", {"id": 1}, desk, allowed=["delete_task"], approve=None, actor="x").kind, "denied")
-        self.assertEqual(len(desk.tasks), 1)
+    def __exit__(self, *exc):
+        return False
 
-    def test_gate_asks_with_plain_words_and_a_crash_means_no(self):
-        """An irreversible tool asks with the real task text; a crashing approver is a refusal; a yes runs it once."""
-        desk = desk_with("Pay rent")
-        questions = []
-        gate.run_tool("delete_task", {"id": 1}, desk, allowed=["delete_task"], actor="x",
-                      approve=lambda n, a, w: questions.append(w) or False)
-        self.assertIn("Pay rent", questions[0])
 
-        def crash(*_):
-            """An approver that breaks."""
-            raise RuntimeError("broken")
-        self.assertEqual(gate.run_tool("delete_task", {"id": 1}, desk, allowed=["delete_task"], approve=crash, actor="x").kind, "denied")
-        self.assertEqual(gate.run_tool("delete_task", {"id": 1}, desk, allowed=["delete_task"], approve=gate.approve_yes, actor="x").kind, "ok")
-        self.assertEqual(desk.tasks, [])
+class _RecorderClient:
+    """Stands in for langfuse.get_client(): records every observation, sends nothing anywhere."""
 
-    def test_a_crashing_input_check_is_a_refusal(self):
-        """If a tool's own validate() raises, the gate refuses the call (kind 'error') and nothing runs."""
-        import desk_tools as dt
-        broken = dt.Tool("boom", "x", {}, "write", lambda a: 1 / 0, lambda a, d: "ran")
-        with patch.dict(dt.TOOLS, {"boom": broken}):
-            outcome = gate.run_tool("boom", {}, desk_with(), allowed=["boom"], approve=gate.approve_yes, actor="x")
-        self.assertEqual(outcome.kind, "error")
-        self.assertIn("input check crashed", outcome.text)
+    def __init__(self, fail=False):
+        self.log, self.flushes, self.fail = [], 0, fail
 
-    def test_agent_cli_says_not_built_yet_without_graph(self):
-        """agent.py (provided) prints a plain 'not built yet' line and exits 2 when graph.py does not exist."""
-        import sys as _sys
-        import agent
-        printed = []
-        with patch.dict(_sys.modules, {"graph": None}):
-            code = agent.main(["x", "--seed", seed("desk_week")], out=printed.append)
-        self.assertEqual(code, 2)
-        self.assertIn("not built yet", printed[0])
+    def start_as_current_observation(self, *, name, as_type="span", input=None, metadata=None, **_kw):
+        if self.fail:
+            raise RuntimeError("viewer is down")
+        self.log.append(("start", name, as_type, input))
+        return _RecorderObservation(self.log, name, as_type)
 
-    def test_the_terminal_approver_says_no_unless_typed_yes(self):
-        """gate.make_ask: 'y' or 'yes' allows; a blank answer or no keyboard at all (EOFError) means no (default deny)."""
-        def eof(_prompt):
-            """No person at the keyboard."""
-            raise EOFError
-        quiet = lambda line: None
-        self.assertTrue(gate.make_ask(lambda p: "yes", quiet)("delete_task", {}, "w"))
-        self.assertFalse(gate.make_ask(lambda p: "", quiet)("delete_task", {}, "w"))
-        self.assertFalse(gate.make_ask(eof, quiet)("delete_task", {}, "w"))
+    def flush(self):
+        self.flushes += 1
 
-    def test_results_are_cut_with_a_marker(self):
-        """A long result is cut to MAX_RESULT_CHARS and marked [truncated]."""
-        self.assertTrue(gate.cut("x" * 500).endswith(" [truncated]"))
-        self.assertEqual(len(gate.cut("x" * 500)), gate.MAX_RESULT_CHARS + len(" [truncated]"))
 
-    # ---- obs.py ----
-    def test_a_run_writes_log_jsonl_html_and_latest_copies(self):
-        """finish() writes logs/run-*.log and .jsonl, out/run-*.html, and real copies named latest.*."""
-        with tempfile.TemporaryDirectory() as folder:
-            run = obs.Run("demo", goal="Add File taxes", quiet=True, root=folder)
-            run.log("tool", "executor", "add_task -> ok")
-            paths = run.finish("done", "ok", {"tasks": [{"id": 1, "text": "File taxes"}], "events": []})
-            for ext, folder_name in (("log", "logs"), ("jsonl", "logs"), ("html", "out")):
-                latest = os.path.join(folder, folder_name, f"latest.{ext}")
-                self.assertTrue(os.path.isfile(paths[ext]) and os.path.isfile(latest))
-                self.assertFalse(os.path.islink(latest))
-            page = open(os.path.join(folder, "out", "latest.html"), encoding="utf-8").read()
-            self.assertIn("Add File taxes", page)
-            self.assertIn("not stamped yet", page)
-            lines = open(os.path.join(folder, "logs", "latest.jsonl"), encoding="utf-8").read().splitlines()
-            self.assertEqual(json.loads(lines[0])["kind"], "header")
+def _fake_langfuse(client):
+    module = types.ModuleType("langfuse")
+    module.get_client = lambda: client
+    return module
 
-    def test_terminal_lines_and_no_secret_in_any_output(self):
-        """Every event prints one line with level, time, agent and kind; an API key in the environment never appears."""
-        printed = []
-        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"GEMINI_API_KEY": "KEY-SECRET-123"}):
-            run = obs.Run("demo", goal="g", root=folder, out=printed.append)
-            run.log("gate", "tasks", "delete task 1 -> denied", level="WARN")
-            run.finish("done", "ok", {})
-            files = "".join(open(os.path.join(folder, d, f), encoding="utf-8").read()
-                            for d in ("logs", "out") for f in os.listdir(os.path.join(folder, d)))
-        self.assertTrue(any(line.startswith("WARN") and "[tasks" in line and "gate" in line for line in printed))
-        self.assertNotIn("KEY-SECRET-123", "\n".join(printed) + files)
 
-    def test_trace_export_nests_run_agent_model_tool(self):
-        """With a trace client, a run opens nested observations: run > agent > model/tool; without one it prints a tree."""
-        opened = []
+class ProvidedTraceExportTests(unittest.TestCase):
+    def _one_shot(self, extra, env, modules):
+        lines = []
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, env, clear=False), \
+                mock.patch.dict(sys.modules, modules):
+            for key in ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY"):
+                if key not in env:
+                    os.environ.pop(key, None)
+            code = app.main(["Delete the dentist task.", "--seed", SEED, "--approve", "no", "--quiet"] + extra,
+                            input_fn=lambda _: "", out=lines.append, root=tmp)
+        return code, "\n".join(lines)
 
-        class Span:
-            """A fake observation context."""
-            def __init__(self, name):
-                """Remember the name."""
-                self.name = name
-
-            def __enter__(self):
-                """Record the opening."""
-                opened.append(self.name)
-                return self
-
-            def __exit__(self, *a):
-                """Nothing to close."""
-                return False
-
-            def update(self, **k):
-                """Accept the final output."""
-
-        client = SimpleNamespace(start_as_current_observation=lambda name, **k: Span(name), flush=lambda: None)
-        run = obs.Run("team", quiet=True, save=False, export="langfuse", langfuse_client=client)
-        with run.agent("tasks"):
-            run.model_call("tasks", llm.Reply("{}", 10, 2, "m", 0.1, "fake"))
-            run.log("tool", "tasks", "list_tasks -> ok", tool="list_tasks")
-        run.finish("done", "ok", {})
-        self.assertEqual(opened, ["run team", "tasks", "tasks model", "tool list_tasks"])
-        printed = []
-        tree_run = obs.Run("team", out=printed.append, save=False, export="console")
-        with tree_run.agent("tasks"):
-            tree_run.log("tool", "tasks", "list_tasks -> ok")
-        tree_run.finish("done", "ok", {})
-        self.assertTrue(any(line.startswith("TRACE run team") for line in printed))
-
-    # ---- stand_in.py and baseline.py (W7-0) ----
-    def test_stand_in_splits_goals_and_routes_by_keywords(self):
-        """The offline stand-in splits 'X, then Y' into parts and picks archive_task for 'archive', add_event for a dated appointment."""
-        from stand_in import classify, split_goal
-        self.assertEqual(split_goal('Add "File taxes", then show me my list.'), ['Add "File taxes"', "show me my list"])
-        self.assertEqual(classify("Archive the dentist task"), "archive_task")
-        self.assertEqual(classify("Add a dentist appointment on Fri 27 Nov 10:00"), "add_event")
-
-    def test_baseline_replay_is_labelled_and_the_gate_still_holds(self):
-        """W7-0: the replayed misroute is labelled REPLAYED, picks delete for 'archive', is denied, and the task stays."""
-        import baseline
-        printed = []
-        with tempfile.TemporaryDirectory() as folder:
-            code = baseline.main(["Archive the dentist task.", "--mode", "replay", "--replay",
-                                  os.path.join(ROOT, "data", "replays", "w7-0-misroute.json"), "--approve", "no",
-                                  "--seed", seed("desk_week")], out=printed.append, root=folder)
-        text = "\n".join(printed)
+    def test_console_export_prints_tree_with_model_tool_and_gate(self):
+        """--export console prints a span tree: the run, the model call, the tool request and the [y/N] gate answer."""
+        code, text = self._one_shot(["--export", "console"], {}, {})
         self.assertEqual(code, 0)
-        self.assertIn("REPLAYED (scripted)", text)
-        self.assertIn("delete task 4", text)
-        self.assertIn("4: Book dentist appointment", text)
+        self.assertIn("trace (console export):", text)
+        for piece in ("run ", "model single", "tool  delete_task", "gate  approve delete_task", "out=denied"):
+            self.assertIn(piece, text)
 
-    def test_baseline_offline_sends_all_twelve_tools_every_call(self):
-        """W7-0: the single agent's prompt carries all twelve tools on every call (the token cost of one big agent)."""
-        import baseline
-        for name in desk_tools.ALL_TOOLS:
-            self.assertIn(f"- {name}(", baseline.AGENT_PROMPT)
+    def test_no_export_by_default_prints_no_trace_tree(self):
+        """Without --export nothing is exported: the trace tree only appears when you ask for it."""
+        code, text = self._one_shot([], {}, {})
+        self.assertEqual(code, 0)
+        self.assertNotIn("trace (console export):", text)
 
-    # ---- data/ ----
-    def test_scenarios_prices_and_regression_cases_are_well_formed(self):
-        """scenarios.json and data/regression/ use known seeds and check types; prices.json names its source and date."""
-        known = {"status_in", "task_exists", "task_missing", "task_archived", "event_exists", "event_missing"}
-        cases = json.load(open(os.path.join(ROOT, "data", "scenarios.json")))["scenarios"]
-        folder = os.path.join(ROOT, "data", "regression")
-        cases += [json.load(open(os.path.join(folder, f))) for f in os.listdir(folder) if f.endswith(".json")]
-        for case in cases:
-            self.assertTrue(os.path.isfile(seed(case["seed"])), case["id"])
-            self.assertTrue({c["type"] for c in case["checks"]} <= known, case["id"])
-        prices = json.load(open(os.path.join(ROOT, "data", "prices.json")))
-        self.assertTrue(prices["source"].startswith("https://") and prices["read_on"])
-        self.assertIn(prices["fallback"], prices["models"])
+    def test_langfuse_without_keys_or_package_falls_back_to_console(self):
+        """--export langfuse with no keys, or keys but no package, prints the console tree instead and never crashes."""
+        code, text = self._one_shot(["--export", "langfuse"], {}, {})
+        self.assertEqual(code, 0)
+        self.assertIn("no Langfuse keys", text)
+        self.assertIn("trace (console export):", text)
+        keys = {"LANGFUSE_PUBLIC_KEY": "pk-test-123", "LANGFUSE_SECRET_KEY": "sk-test-SECRET"}
+        code, text = self._one_shot(["--export", "langfuse"], keys, {"langfuse": None})   # None = not installed
+        self.assertEqual(code, 0)
+        self.assertIn("package is missing", text)
+        self.assertNotIn("sk-test-SECRET", text)
+
+    def test_langfuse_export_with_recorder_fake_sends_typed_spans_and_never_prints_keys(self):
+        """With keys and a (fake, offline) langfuse package, spans go out as agent/generation/tool/guardrail and are flushed."""
+        client = _RecorderClient()
+        keys = {"LANGFUSE_PUBLIC_KEY": "pk-test-123", "LANGFUSE_SECRET_KEY": "sk-test-SECRET"}
+        code, text = self._one_shot(["--export", "langfuse"], keys, {"langfuse": _fake_langfuse(client)})
+        self.assertEqual(code, 0)
+        kinds = {entry[2] for entry in client.log if entry[0] == "start"}
+        self.assertEqual(kinds, {"agent", "generation", "tool", "guardrail"})
+        self.assertGreaterEqual(client.flushes, 1)
+        self.assertIn("toy data only", text)
+        self.assertNotIn("sk-test-SECRET", text)
+        self.assertNotIn("pk-test-123", text)
+        gen = [e for e in client.log if e[0] == "update" and e[2] == "generation"][0][3]
+        self.assertEqual(gen["model"], "stand-in")   # the stand-in is never reported as a real Gemini model
+
+    def test_broken_exporter_never_breaks_the_run(self):
+        """If the trace viewer fails, the turn still finishes normally and one warning is printed."""
+        keys = {"LANGFUSE_PUBLIC_KEY": "pk-test-123", "LANGFUSE_SECRET_KEY": "sk-test-SECRET"}
+        code, text = self._one_shot(["--export", "langfuse"], keys, {"langfuse": _fake_langfuse(_RecorderClient(fail=True))})
+        self.assertEqual(code, 0)
+        self.assertIn("status: done-with-denials", text)
+        self.assertEqual(text.count("trace export problem"), 1)

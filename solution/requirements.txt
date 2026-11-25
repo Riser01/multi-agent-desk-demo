@@ -1,5 +1,7 @@
-# Python 3.11 or newer.
+# Python 3.11 or newer (langchain-core 1.8.4, pulled in by LangGraph, needs 3.11+).
 langgraph==1.2.23
-# Only for --live runs (the real Gemini model). Offline runs and every check work without it.
-google-genai==3.6.1
-# Optional trace viewer, not installed by default:  pip install "langfuse==5.2.0"
+
+# Optional, only for --export langfuse with your own free Langfuse account (Python 3.11+):
+#   pip install langfuse==5.2.0
+# Optional, only for --live runs with your own Gemini API key:
+#   pip install google-genai

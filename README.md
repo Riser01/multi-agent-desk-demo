@@ -1,68 +1,54 @@
-# Multi-Agent Desk Demo: turn one agent into a team, and measure whether it was worth it
+# Multi-Agent Desk Demo (v2)
 
-Last week you built the **Desk Assistant**: a to-do agent with a loop, tools, an approval gate for deletes, limits and a trace. This week it has grown a calendar and twelve tools, and one agent with twelve look-alike tools in one long prompt starts to struggle. You will split it into a **team** (a planner and an executor, then a supervisor with two specialist workers and a reviewer) using **LangGraph**, with **any coding agent** (Claude Code, Cursor, Copilot, Windsurf...). You do not type the code yourself: you read a short spec, ask your agent well, and check the result with a scoreboard.
+Turn Week 6's single Desk Assistant into a multi-agent team using **LangGraph** and a **coding agent** (we use Cursor;
+Claude Code, Copilot or Windsurf work too), then test it live in an **interactive terminal chat** with a real
+**`todo-list.md`** file and **`sessions/`** save/resume. You direct the coding agent; nobody hand-types code.
 
-> **Split only when you must, and pay for it knowingly.** More agents means more calls, more tokens and more places to fail. It also means smaller prompts, fewer tools per agent and more places to stop a bad action. This repo lets you see both sides in numbers.
+> **Split only when you must, and pay for it knowingly.**
 
-**No key needed to build.** Every run uses an offline **stand-in** model by default (rule-based, labelled in every log and report, deliberately gullible so you can watch the safety parts work). A free Gemini key is only for `--live` runs.
+**No API key required.** Everything runs offline with a built-in stand-in model by default (deterministic, free, and
+deliberately gullible on the `/drill` attack so you can watch your safety code work). The stand-in is **not a real
+model**: every log, `logs/runs.jsonl` row and `out/latest.html` says `offline stand-in (not a real model)`, its token
+counts are estimates, and every cost is notional (list price). Pass `--live` with your own free Gemini key in `.env`
+for real model calls.
 
-## Start here
-Repo: https://github.com/Riser01/multi-agent-desk-demo (if the link shows 404, ask your instructor for the ZIP or the current link).
+**Needs Python 3.11 or newer** and one package: `langgraph==1.2.23`.
 
-1. [`GUIDE.md`](GUIDE.md): from zero (git, Python, a coding agent) to every phase, with the exact prompt, commands and expected output.
-2. [`docs/00-overview.md`](docs/00-overview.md): the picture, the phase map, and what the logs and the HTML report show.
-3. [`AGENTS.md`](AGENTS.md): the rules your coding agent follows. Its first message must be "Read AGENTS.md first and follow it."
-
-## The phases (Sunday 29 Nov)
-| Phase | Session | You build | Concept | Check |
-|---|---|---|---|---|
-| W7-0 | AM, 5 min | nothing (`baseline.py` is provided) | why one agent with twelve tools struggles | `python baseline.py ...` |
-| W7-1 | AM | `state.py`, `graph.py` | shared state with reducers, one agent as a graph node | `python check.py 1` |
-| W7-2 | AM | `handoff.py`, `planner.py`, `executor.py` | two agents, a structured handoff | `python check.py 2` |
-| W7-3 | AM | caps and `validate_plan` in `handoff.py` | break the handoff on purpose, then cap it. **Your turn:** one rule | `python check.py 3` |
-| W7-4 | PM | `supervisor.py`, `workers.py` | supervisor + specialists, what each agent sees | `python check.py 4` |
-| W7-6 | PM | `reviewer.py` | a reviewer on risky actions, max two rounds | `python check.py 6` |
-| W7-7 | PM | `prod.py` | cost meter, model routing, version stamp. **Your turn:** a cost ceiling | `python check.py 7` |
-| W7-8 | PM, shown | nothing (`compare.py` is provided) | the honest comparison and the launch checklist | `python compare.py` |
-| stretch | any time | read and run `extras/` | W7-5 parallel `Send`; canary and rollback; monitoring | `python check.py extras` |
-
-## Two things to know before you start
-- **Approval is a blocking question, not LangGraph `interrupt()`.** When an irreversible action needs a yes, the gate asks in the terminal and waits. There is no pause-and-resume and no checkpointer here; `interrupt()` is covered on the slides.
-- **The team path has no plan check.** The planner/executor path (W7-3) rejects a planted-note delete at the plan. The supervisor team has no plan: without `--review`, the gate and the human are the only defence. W7-6 adds the reviewer.
-
-## What every run leaves behind
-- **Terminal:** one `INFO` / `WARN` / `ERROR` line per step: what each agent saw, each model reply with time and tokens, each handoff, tool call and gate decision.
-- **`logs/latest.log`** (and `logs/latest.jsonl`, one JSON event per line), plus a timestamped copy per run.
-- **`out/latest.html`**: open it in a browser. A timeline of agents and handoffs with "what each agent saw", tokens, notional cost, time, the version stamp and the final desk.
-- **Optional Langfuse:** `--export langfuse` draws the run as nested spans (run > agent > model / tool / gate). Without keys, `--export console` prints the same tree.
-
-## How to check your work
+## Quick start
 ```bash
-python check.py
+python3 -m venv .venv && source .venv/bin/activate   # Windows cmd: py -m venv .venv && .venv\Scripts\activate
+pip install -r requirements.txt
+python check.py 0                                    # Setup: all 14 green
+python app.py                                        # Launch interactive chat (built-in single agent)
 ```
-One plain line per phase. Unbuilt phases say "not built yet". A failing test prints `Phase W7-N, requirement: ...` first. **Passing the check is the grade.** `python check.py 2` checks one phase, `python check.py style` checks the comment standard.
+New to terminals, git or Python? Follow [`GUIDE.md`](GUIDE.md) from Step 1 (Mac and Windows, from zero).
+Open **`todo-list.md`** side-by-side in your editor and watch tasks, events, and notes update live after every turn.
+Quit anytime (`/quit` or Ctrl+C) — your session auto-saves to `sessions/` and revives with `python app.py --resume latest`.
 
-## The two-failures rule
-1. Paste the failing `requirement:` line into your coding agent and say **"fix only this"**.
-2. After **two** failed tries, paste the phase's section from `docs/02-technical-spec.md`.
-3. Still stuck? Compare with the matching file in `solution/`. Never edit `tests/`.
+## The 4 phases (Sunday 29 Nov)
+| Phase | Session | You build | What you learn | Check |
+|---|---|---|---|---|
+| **AM-1** | Morning | `two_agent.py` | Planner (no tools) -> structured handoff -> Executor + delete gate; 1 model call | `python check.py 1` (5) |
+| **AM-2** | Morning | `safety.py` | Huge-note `/drill`, context cap (`600` chars), `validate_plan()`; Your turn: duplicate-step rule | `python check.py 2` (5), `python check.py 2 your-turn` (2) |
+| **PM-1a / 1b** | Afternoon | `team.py` | Supervisor + 2 least-privilege workers (Part A), then bounded Reviewer (Part B); 5 to 7 calls | `python check.py 3` (9) |
+| **PM-2** | Afternoon | `prod.py` | Cost meter, model routing, version stamp + `/rollback`, `/ceiling`, `/compare`, `/monitor` | `python check.py 4` (5) |
+| *Stretch* | Optional | `stretch.py` | A real LangGraph `interrupt()` approval gate with a checkpointer | `python check.py stretch` (5) |
 
-## What is in this repo
-| Path | What it is |
-|---|---|
-| `docs/` | the specs: overview, product, technical contract, one page per phase, edge cases, harness map, launch checklist, predict sheet, recorded runs |
-| `config.py`, `llm.py`, `stand_in.py`, `desk_tools.py`, `gate.py`, `obs.py` | provided: keys, model seam (fake / replay / live, call cap, backoff), the offline stand-in, the desk and its twelve tools, last week's gate, logging and the HTML report |
-| `agent.py`, `baseline.py`, `compare.py` | provided: the command you run every phase, the W7-0 single agent, the W7-8 comparison |
-| `check.py`, `tests/` | the scoreboard and its tests (fake models, deterministic). Do not edit |
-| `data/` | seed desks, scenarios, regression cases, replay files, list prices (dated) |
-| `extras/` | stretch: parallel fan-out, canary and rollback, monitoring |
-| `solution/` | the finished reference, every file opening with a short story |
-| you build | `state.py handoff.py planner.py executor.py supervisor.py workers.py reviewer.py prod.py graph.py` |
-| `checkpoints/` | join-here zips: the learner files and wiring up to W7-1, W7-2, W7-3 or W7-4, for anyone who fell behind |
+Behind? `checkpoints/after-AM.zip` (two_agent + safety) and `checkpoints/after-PM1.zip` (+ team) let you join the
+next phase cleanly; see GUIDE.md.
 
-Python 3.11 or newer. Dependencies: `langgraph==1.2.23` (and `google-genai` for live runs only). Keys live only in a git-ignored `.env`; no key appears anywhere in this repo.
+## Provided files (do not edit)
+- `app.py` — interactive terminal chat, built-in `single` baseline, slash commands (`/setup`, `/review`, `/ceiling`, `/rollback`, `/drill`, `/compare`, `/monitor`, `/export`, `/save`, `/load`, `/reset`), `logs/latest.log`, `logs/runs.jsonl`, `out/latest.html`.
+- `desk.py` — the Desk (tasks, calendar, notes), 8 tools, blocking `[y/N]` delete approval gate, live `todo-list.md`, and `sessions/` persistence (validated on load; Windows-reserved names such as `con` or `nul` are refused).
+- `llm.py` — offline stand-in default + opt-in `--live` Gemini adapter with 429 backoff and per-turn call cap, plus the optional trace export.
+- `check.py` + `tests/` — behavioural scoreboard (Setup 14, AM-1 5, AM-2 5 + 2 Your turn, PM-1 9, PM-2 5, stretch 5).
 
-## Honest numbers
+## Optional: trace export (console or Langfuse)
+`python app.py ... --export console` prints a tree of every model call, tool request and `[y/N]` answer after each
+turn. `--export langfuse` sends the same spans to **your own free Langfuse account** (keys in `.env`, see
+`.env.example`; `pip install langfuse==5.2.0`, Python 3.11+); without keys or the package it falls back to the console
+tree. Toy tasks only: prompts leave your machine. Not yet verified against a real Langfuse server as of 2026-11-25.
 
-Not yet verified against the real services (as of 2026-11-24): the `--live` Gemini path and the routing model names (`gemini-3.5-flash-lite`, `gemini-2.5-flash-lite`), and `--export langfuse` against a real Langfuse server. Everything else here ran offline with the labelled stand-in.
-Offline runs show the **shape** of the trade (how many calls, how big each prompt) with estimated tokens (characters / 4). Cost is always **notional, at list price** on the date in `data/prices.json`: the free tier costs nothing. Real token counts come only from `--live`. Replayed runs are labelled **REPLAYED**; the two replay files shipped here were written by hand to show a failure shape and say so.
+*Honest note:* Approval is a blocking terminal callback (`[y/N]`), and `sessions/` saves your Desk and an audit-only turn log **between turns** as JSON — neither is LangGraph's mid-turn `interrupt()` checkpointer (covered on Saturday's slides, and built in the optional `docs/stretch.md`).
+
+Start with [`GUIDE.md`](GUIDE.md). Want to inspect or build the entire project from specs alone? Start with [`docs/00-foundation.md`](docs/00-foundation.md) followed by `docs/AM-1.md`..`PM-2.md`. Non-coders / watch-only learners: open [`docs/predict-sheet.md`](docs/predict-sheet.md).

@@ -1,70 +1,61 @@
-"""Small helpers shared by the tests: a quiet run log, a desk with chosen items, a team with a scripted model.
+"""Test helpers: a scripted model that says exactly what each role should answer, and a recorder for graph configs.
 
-Tests must give the same answer every time, with no key and no network, so every model here is llm.FakeModel: it
-replays exact scripted replies per role and records every message it was sent. That record is how a test checks
-"what each agent saw", which is the heart of this week. The run log is quiet and writes no files, so a test run
-leaves nothing behind.
-
-What to look at
-    quiet_run()   an obs.Run that prints nothing and saves nothing, but still collects every event.
-    desk_with()   a Desk with the given task texts (ids 1, 2, 3 ...) and optional events after them.
-    team_with()   a Team around a FakeModel script, a desk and an approver. Returns (team, model).
-    call()        one tool-call reply: call("add_task", text="x") -> {"tool": "add_task", "args": {"text": "x"}}.
-    saw()         the messages one role was sent, in order.
+The offline stand-in in llm.py always gives the same, sensible answers. Some safety limits only matter when a model
+misbehaves (a supervisor that never finishes, a worker that asks for the wrong tool, a reviewer that changes its
+mind). ScriptedModel plays those misbehaving models so the limits can be tested offline, with no key and no network.
 """
-import os
-import sys
+import json
+from contextlib import contextmanager
+from unittest import mock
 
-ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-sys.path.insert(0, ROOT)   # make the project folder importable however the tests are started
-
-import obs  # noqa: E402
-from desk_tools import Desk, load_desk  # noqa: E402
-from gate import approve_no  # noqa: E402
-from llm import FakeModel  # noqa: E402
+import llm
 
 
-def seed(name: str) -> str:
-    """The path of a seed file in data/seeds/."""
-    return os.path.join(ROOT, "data", "seeds", f"{name}.json")
+class ScriptedModel:
+    """Callable like llm.make_model(): model(role, system, user, model_name=None) -> llm.Reply.
+
+    script maps a role to a list of JSON payloads (used in order, the last one repeats) or to a function of the user
+    text that returns a payload. Every prompt is recorded in .seen[role]; .calls counts all calls.
+    """
+    label = "scripted test model"
+
+    def __init__(self, script: dict):
+        self.script = script
+        self.seen: dict[str, list[str]] = {}
+        self.calls = 0
+
+    def reset(self) -> None:
+        self.calls = 0
+
+    def count(self, role: str) -> int:
+        return len(self.seen.get(role, []))
+
+    def __call__(self, role, system, user, model_name=None):
+        self.calls += 1
+        self.seen.setdefault(role, []).append(user)
+        rule = self.script.get(role, {"tool": "list_tasks", "args": {}})
+        if callable(rule):
+            payload = rule(user)
+        elif isinstance(rule, list):
+            idx = min(self.count(role) - 1, len(rule) - 1)
+            payload = rule[idx]
+        else:
+            payload = rule
+        text = payload if isinstance(payload, str) else json.dumps(payload)
+        return llm.Reply(text=text, input_tokens=10, output_tokens=5, model=model_name or "stand-in",
+                         seconds=0.0, source="fake", estimated=True)
 
 
-def quiet_run(name: str = "test", **kwargs) -> obs.Run:
-    """A run log that prints nothing and writes no files, but keeps every event for the test to read."""
-    return obs.Run(name, quiet=True, save=False, **kwargs)
+@contextmanager
+def record_graph_configs():
+    """Record the `config` passed to every LangGraph invoke() inside the block (to check recursion_limit)."""
+    from langgraph.pregel import Pregel
+    seen: list = []
+    original = Pregel.invoke
 
+    def spy(self, input, config=None, **kwargs):
+        seen.append(config)
+        return original(self, input, config, **kwargs)
 
-def desk_with(*tasks: str, events: tuple = ()) -> Desk:
-    """A desk holding these task texts (ids 1..n) and these (when, title) events (ids after the tasks)."""
-    desk = Desk()
-    for text in tasks:
-        desk.tasks.append({"id": desk.next_id, "text": text, "done": False, "archived": False})
-        desk.next_id += 1
-    for when, title in events:
-        desk.events.append({"id": desk.next_id, "when": when, "title": title})
-        desk.next_id += 1
-    return desk
-
-
-def team_with(script, desk=None, approve=approve_no, **kwargs):
-    """A Team around a scripted FakeModel. Returns (team, model) so the test can read model.calls."""
-    from state import Team
-    model = FakeModel(script)
-    team = Team(model=model, desk=desk if desk is not None else load_desk(seed("desk_week")), run=quiet_run(),
-                approve=approve, **kwargs)
-    return team, model
-
-
-def call(tool: str, **args) -> dict:
-    """One scripted tool-call reply."""
-    return {"tool": tool, "args": args}
-
-
-def saw(model: FakeModel, role: str) -> list[str]:
-    """Every message the given role was sent, in order: what that agent saw."""
-    return [c["user"] for c in model.calls if c["role"] == role]
-
-
-def kinds(run: obs.Run, kind: str) -> list[dict]:
-    """The events of one kind in a run log."""
-    return [e for e in run.events if e["kind"] == kind]
+    with mock.patch.object(Pregel, "invoke", spy):
+        yield seen

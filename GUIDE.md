@@ -1,562 +1,316 @@
-# Guide: build the Desk Assistant Team, phase by phase
+# Learner Guide — Multi-Agent Desk Demo (v2)
 
-Do the steps in order. Copy each command into a terminal, one block at a time. Run the check after every phase. Morning (Build Hour 1): W7-0 to W7-3. Afternoon (Build Hour 2): W7-4, W7-6, W7-7, then W7-8 is shown. Finishing W7-0 to W7-3 is a complete outcome.
+**How Sunday works:** you direct a coding agent. For each phase you paste one prompt, the agent writes the file, and
+you check it with `python check.py N`. The instructor demonstrates the same prompts live on screen. Nobody hand-types
+code. Watching only is fine too: follow `docs/predict-sheet.md`.
 
-Every command below runs **offline** with the stand-in model (no key, no quota). Expected outputs are pasted from real recorded offline runs in `docs/sample-runs/`; times, token counts and file names will differ a little on your machine. Look for the key lines, not identical text.
+No API key and no account are needed. Everything runs offline on your laptop.
 
-> **Can't or don't want to code?** You can follow the whole day without building anything. Use `docs/predict-sheet.md`: before each run, write what you expect; then open the recorded run in `docs/sample-runs/` (the `.txt` files are the terminal output; the `.html` files are the report pages, open them in a browser). That is a complete way through the day.
-
-## Words used here (one line each)
-- **Terminal:** a window where you type commands (Mac: Terminal app; Windows: Command Prompt, called `cmd`).
-- **venv:** a private Python environment for this project only, so installs do not touch the rest of your computer.
-- **pip:** Python's installer; `pip install -r requirements.txt` installs what this project needs.
-- **Coding agent:** an AI assistant that edits files and runs commands in this folder for you.
-- **Langfuse:** an optional website that draws each run as a tree. You can skip it.
-
-## Minutes for the day
-| Build Hour 1 (morning) | Minutes | | Build Hour 2 (afternoon) | Minutes |
-|---|---|---|---|---|
-| W7-0 baseline (run only) | 5 | | W7-4 supervisor + workers | 22 |
-| W7-1 state + one agent node | 22 | | W7-6 reviewer | 20 |
-| W7-2 planner + executor | 25 | | W7-7 cost meter + ceiling (Your turn) | 18 |
-| W7-3 caps + validation (incl. Your turn 8) | 18 | | W7-8 comparison (shown) + monitor/canary demo | 10 |
-| **buffer** | **15** | | **buffer** | **15** |
-
-Items marked *if time* can be skipped without breaking anything later.
+### Words used in this guide (one line each)
+- **Terminal:** the window where you type commands (Mac: Terminal; Windows: Command Prompt, called `cmd`).
+- **git:** a tool that downloads ("clones") a project and tracks changes. Optional here: the ZIP download works too.
+- **venv:** a private Python folder (`.venv`) for this project, so its packages do not mix with anything else.
+- **pip:** Python's installer. `pip install -r requirements.txt` installs what this project needs.
+- **LangGraph:** a Python library for wiring agents as a graph of steps (nodes) with shared state. The only package we install.
+- **Coding agent:** an AI app that edits files and runs commands in your project folder for you (we use Cursor).
+- **Stand-in:** the built-in fake model in `llm.py`. Rule-based, free, always gives the same answer, and deliberately easy to fool on `/drill`. It is **not a real model**, and every output says so.
+- **Notional cost:** what the same calls would cost at the published list price. You pay nothing; free-tier keys are billed $0.
 
 ---
 
-## Setup (do this before Sunday)
+## Setup (do once, before Sunday, about 20 minutes)
 
-### Step 1. Install git (or skip it and use the ZIP)
-- **Mac:** open Terminal and run `git --version`. If a pop-up offers "command line developer tools", click Install and wait (several minutes).
-- **Windows:** download from https://git-scm.com/downloads, run the installer with the defaults, then open a **new** Command Prompt.
+### Step 1. Get the project
+Repo: **https://github.com/Riser01/multi-agent-desk-demo** (v2 replaces v1 at this address before class; if the link
+shows 404, ask your instructor). Pick one option.
 
-```bash
-git --version
-```
-You should see `git version 2.x`. No git? Use Option A in Step 3.
+**Option A: ZIP (no git needed)**
+1. Open the repo page, click the green **Code** button, then **Download ZIP**.
+2. Unzip it. Mac: double-click the ZIP in Downloads. Windows: right-click it, **Extract All**, **Extract**.
+3. Move the folder to Documents and open it. You should see `README.md`, `check.py` and `AGENTS.md`. If you see one
+   more folder inside, open that one: it is the project folder.
 
-### Step 2. Install Python 3.11 or newer
-Download from https://www.python.org/downloads/ (Windows: tick **Add python.exe to PATH** on the first installer screen). Then open a **new** terminal and check:
-
-Mac:
-```bash
-python3 --version
-```
-Windows:
-```bash
-py --version
-```
-You need 3.11 or higher. A new Mac often has 3.9: if it says 3.9 or lower, install from python.org, open a **new** terminal, and check again.
-
-### Step 3. Get the project
-Repo: https://github.com/Riser01/multi-agent-desk-demo (if the link shows 404, ask your instructor for the ZIP or the current link).
-
-**Option A: ZIP.** Open the repo page, click the green **Code** button, then **Download ZIP**. Unzip it (Mac: double-click; Windows: right-click, **Extract All**). The folder is called `multi-agent-desk-demo-main`; on Windows it is often one folder **inside** another with the same name: open folders until you see `check.py`, `README.md` and `GUIDE.md` together. That is the project folder. Windows tip: if Documents is inside OneDrive, put the folder in `C:\work` instead (OneDrive can lock files while they sync).
-
-**Option B: git.** Mac:
+**Option B: git**
+Check whether git is installed: `git --version`. If it says "not found", install it from
+https://git-scm.com/downloads (Windows: accept the defaults; Mac: a pop-up may offer "command line developer tools":
+click Install), or use Option A.
 ```bash
 cd ~/Documents
-```
-Windows:
-```bash
-cd %USERPROFILE%\Documents
-```
-Then:
-```bash
 git clone https://github.com/Riser01/multi-agent-desk-demo.git
-```
-```bash
 cd multi-agent-desk-demo
 ```
+Windows `cmd`: use `cd %USERPROFILE%\Documents` for the first line.
 
-### Step 4. Open a terminal in the project folder
-- **Mac:** Terminal, type `cd ` (with a space), drag the project folder into the window, press Return.
-- **Windows:** open the project folder in File Explorer, click the address bar, type `cmd`, press Enter. Use Command Prompt, not PowerShell (PowerShell twins are given where they differ).
-- **In Cursor:** File > Open Folder, choose the project folder, then Terminal > New Terminal.
+### Step 2. Install Python 3.11 or newer
+Check first (open a terminal as in Step 3):
+- Mac: `python3 --version`
+- Windows: `py --version`
 
-### Step 5. Make the venv and install
+You need **3.11 or higher** (3.10 is too old: LangGraph's dependencies need 3.11). If it is lower or "not found":
+download Python from https://www.python.org/downloads/, run the installer, and on **Windows tick "Add python.exe to
+PATH"** on the first screen. Then close and reopen the terminal and check again.
+
+### Step 3. Open a terminal in the project folder
+- **Mac:** open Terminal, type `cd ` (with a space), drag the project folder into the window, press Return.
+- **Windows:** open the folder in File Explorer, click the address bar, type `cmd`, press Enter. A black Command
+  Prompt window opens already in the folder.
+- **In Cursor or VS Code:** open the folder, then Terminal > New Terminal.
+
+**Windows: PowerShell or cmd?** If the prompt starts with `PS C:\...`, you are in PowerShell. Type `cmd` and press
+Enter to switch to Command Prompt; every Windows command in this guide is for `cmd`. (In PowerShell the activate
+command is `.venv\Scripts\Activate.ps1` and may be blocked by "running scripts is disabled": switching to `cmd` avoids that.)
+
+### Step 4. Create the venv and turn it on
 Mac:
 ```bash
 python3 -m venv .venv
-```
-```bash
 source .venv/bin/activate
 ```
-Windows (Command Prompt):
+Windows `cmd`:
 ```bash
 py -m venv .venv
-```
-```bash
 .venv\Scripts\activate
 ```
-Windows PowerShell instead: run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then `.venv\Scripts\Activate.ps1`.
+You should now see `(.venv)` at the start of the line. **Run the second line again in every new terminal** (the venv
+switches off when you close the window). With the venv on, `python` means the right Python on both Mac and Windows,
+so the rest of this guide just says `python`.
 
-Then (both):
+### Step 5. Install LangGraph
 ```bash
 pip install -r requirements.txt
 ```
-This installs LangGraph and `google-genai` (the Gemini library, only used by `--live` runs). You should see `(.venv)` at the start of the prompt. **In every new terminal, `cd` to the folder and run the activate line again.** From here on, every command is `python ...` (with the venv on, `python` is the right Python on Mac and Windows).
+This installs `langgraph==1.2.23` and the packages it needs. It takes a minute.
 
-### Step 6. The first check
+### Step 6. Check the setup
 ```bash
 python check.py
 ```
-What you should see (nothing built yet, and that is correct):
+What you should see:
 ```text
-Setup   provided files: all 24 green
-Phase W7-1  State and one agent node: not built yet (state.py does not exist)
-Phase W7-2  Planner and executor: not built yet (handoff.py does not exist)
-...
-Phase W7-8  The comparison (provided; runs your graphs): not built yet (graph.py does not exist)
-Style   comment standard: ok (0 files checked)
+Setup  provided CLI, desk, sessions & todo-list.md: all 14 green
+AM-1  Two-agent planner + executor (two_agent.py): not built yet (two_agent.py does not exist)
+AM-2  Handoff caps + plan check (safety.py): not built yet (safety.py does not exist)
+PM-1  Supervisor, workers + reviewer (team.py): not built yet (team.py does not exist)
+PM-2  Cost meter, routing + version stamp (prod.py): not built yet (prod.py does not exist)
 ```
+"not built yet" is correct: you build those files on Sunday.
 
-### Step 7. A coding agent: Cursor
-We recommend **Cursor** (an editor with a built-in coding agent and terminal): download from https://cursor.com/download, install, sign in. Check its pricing page for the current plan limits: a free plan may run out during a full day of building, so test it before Sunday. (Already use another coding agent that can edit files and run commands, such as Claude Code? That works the same way. A chat in a browser tab will not.)
-
-1. In Cursor: File > Open Folder, choose the project folder (the one with `check.py`).
-2. Open the agent panel (the chat on the right), choose **Agent** mode, and allow it to edit files and run terminal commands.
-3. Your first message, exactly:
+### Step 7. Get the coding agent
+We recommend **Cursor**: download from https://cursor.com/download and sign in (a free account works; the free plan
+limits how many agent requests you get, so check https://cursor.com/pricing). Any agent that can edit files and run
+commands in a folder also works (Claude Code, Copilot, Windsurf); a chat in a browser tab will not.
+Open the project folder in it (File > Open Folder) and send this first message:
 ```text
-Read AGENTS.md first and follow it for this whole session. Use "python" (not python3) for every command, with the .venv turned on. Never open or print my .env file. Do not use --live. Reply "ready" when you have read it.
+Read AGENTS.md first and follow its rules. Do not edit provided files or tests. Never open or print my .env file. Wait for my phase prompt.
 ```
 
-### Step 8 (optional). A free Gemini key, for live runs only
-You do not need it to build or to pass any check. It lets you see what a real model does (`--live`).
-1. https://aistudio.google.com/apikey, sign in with a personal Google account, **Create API key**, copy it.
-2. Make `.env` (a file whose name starts with a dot is hidden in Finder; on Windows make sure it does not become `.env.txt`):
+### Step 8 (optional). `.env` for `--live` or `--export langfuse`
+Skip this unless you want real Gemini calls (`--live`) or the Langfuse trace viewer. Copy the example file:
+- Mac: `cp .env.example .env`, then `open -e .env`
+- Windows `cmd`: `copy .env.example .env`, then `notepad .env`
 
-Mac:
-```bash
-cp .env.example .env
-```
-```bash
-open -e .env
-```
-Windows:
-```bash
-copy .env.example .env
-```
-```bash
-notepad .env
-```
-3. Paste after `GEMINI_API_KEY=` with no spaces or quotes. Save (Windows: if Notepad shows a Save As box, set "Save as type" to "All files" so it stays `.env`, not `.env.txt`). Never paste the key into the agent chat.
+Fill in only the lines you need (no quotes, no spaces) and save. **Windows Notepad warning:** if you create the file
+from Notepad's Save As, it may save as `.env.txt`, which is ignored. Use the `copy` command above, or in Save As choose
+"All files" and type `.env`. Paste keys only into `.env`, never into the coding agent's chat.
 
-### Step 9 (optional). Langfuse
-Free account at https://cloud.langfuse.com, a project, API keys into the three `LANGFUSE_` lines of `.env`, then:
+### Step 9 (optional). Langfuse trace viewer
+Optional, with your own free account, toy tasks only. Create a project at https://cloud.langfuse.com, make API keys,
+and put `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` and `LANGFUSE_BASE_URL` in `.env` (US-region projects use
+`https://us.cloud.langfuse.com`). Then:
 ```bash
-pip install "langfuse==5.2.0"
+pip install langfuse==5.2.0
+python app.py "Delete the dentist task." --approve no --export langfuse
 ```
-Prompts and task text go to Langfuse: toy data only. Without it, `--export console` shows the same tree in your terminal.
+Without keys (or without the package) the same command prints the trace tree in your terminal instead, so
+`--export console` always works offline. In the chat, `/export langfuse`, `/export console` or `/export off` switch it.
+Prompts and desk text are sent to Langfuse: use the toy desk only. *Honest note: the export is written against
+langfuse 5.2.0 and tested offline with a fake recorder; it is not yet verified against a real Langfuse server as of 2026-11-25.*
 
-### Open your results (after any run)
-Mac:
+---
+
+## Where to look (keep this open)
+| What | Where | Open it on Mac | Open it on Windows (`cmd`) |
+|---|---|---|---|
+| Your live to-do list, rewritten after every turn | `todo-list.md` | open it in Cursor, side by side with the terminal (or `open todo-list.md`) | open it in Cursor (or `notepad todo-list.md`) |
+| A readable page for the last turn | `out/latest.html` | `open out/latest.html` | `start out\latest.html` |
+| The full step log of the last turn | `logs/latest.log` | `open -e logs/latest.log` | `notepad logs\latest.log` |
+| One line per turn (what `/monitor` reads) | `logs/runs.jsonl` | `open -e logs/runs.jsonl` | `notepad logs\runs.jsonl` |
+| Saved sessions (resume with `python app.py --resume latest`) | `sessions/` | `ls sessions` | `dir sessions` |
+
+Every log, `runs.jsonl` row and HTML page says `mode: offline stand-in (not a real model)` unless you used `--live`.
+
+---
+
+## Warm-up: the built-in single agent (Week 6)
 ```bash
-open out/latest.html
+python app.py
 ```
-```bash
-open -e logs/latest.log
+Type `Add Buy milk`, then `/desk`, then `/quit`. Expected:
+```text
+INFO  [single] sees: goal + whole desk + full notes (357 chars); tools: all 8
+INFO  [single] model=stand-in in=141(est.) out=21 (0.01s)
+INFO  [single] tool add_task -> ok: added task #9: Buy milk
+status: done  |  calls: 1  |  answer: added task #9: Buy milk
 ```
-Windows:
-```bash
-start out\latest.html
-```
-```bash
-notepad logs\latest.log
-```
-Log lines are long: make the terminal window wider, or add `--quiet` to a command to see only the summary.
+`Buy milk` appears in `todo-list.md`. `/quit` saves; `python app.py --resume latest` brings the same desk back.
+The stand-in has no chat memory: name the task or event in every message.
 
 ---
 
 ## How every phase works
-1. Open `docs/phase-W7-N.md`. Copy the block under **Ask your agent exactly this** into your coding agent (or the short prompt below).
-2. Approve its edits.
-3. Run the two checks: `python check.py N` (this phase must be green) and `python check.py` (earlier phases still green; later ones say "not built yet").
-4. Run the try-it commands and compare with **What you should see**. Open `out/latest.html`.
-
-**`agent.py` is provided.** It is the command you run in every phase; it uses the files you build. Before W7-1 is built it answers `configuration error: graph.py is not built yet (W7-1)`.
-
-**How approval works here:** when an irreversible action needs a yes, the gate asks in the terminal and waits (a plain blocking question, `APPROVAL NEEDED: ...`). This is **not** LangGraph's `interrupt()`: there is no pause-and-resume and no checkpointer. `interrupt()` is shown on the slides as the production way to pause for a human.
-
-### The stuck ladder
-1. Copy only the line starting `Phase W7-N, requirement:` into your agent and say **"fix only this"**.
-2. After **two** failed tries: paste the phase's section of `docs/02-technical-spec.md` into the agent.
-3. Still stuck: ask the agent to compare with `solution/<file>.py` (allowed after two tries).
-4. Behind the class: use a **join here** block below.
-5. Never edit `tests/`. A green check is the grade.
+1. Paste the phase prompt into your coding agent. Approve its file edits.
+2. Run `python check.py N` until it is green, then `python check.py` to confirm nothing earlier broke.
+3. Try it live in `python app.py` and compare with "Expected" below.
+4. If a check line fails, paste only its `requirement:` line to the agent and say "fix only this".
 
 ---
 
-## Build Hour 1 (morning): one agent, then two
+## Morning — Build Hour 1: Two-Agent System
 
-### W7-0: why one agent breaks (5 min, nothing to build)
-Purpose: measure the thing you are about to split. What you learn: one agent pays for twelve tools on every call; look-alike tools invite the wrong pick.
+### AM-1: Planner + Executor (`two_agent.py`, 30 min)
+**What you learn:** split "decide" from "do". The planner has no tools; the executor runs the plan through the delete gate.
+**Prompt to your coding agent:**
+```text
+Read AGENTS.md and docs/AM-1.md, then build two_agent.py. Run python check.py 1 until green.
+```
+**Expected check:** `AM-1  Two-agent planner + executor (two_agent.py): all 5 green`
+**Try it live:** `python app.py --setup two`
+- Type `Add File taxes, then show me my list.` -> `File taxes` appears in `todo-list.md`:
+  ```text
+  INFO  [planner] sees: goal + desk notes (46 chars, not capped); tools: none
+  INFO  [planner] proposed 2 step(s): ['add_task', 'list_tasks']
+  INFO  [executor] sees: the plan only (2 step(s)), never the notes; tools: all 8 through the [y/N] gate
+  status: done  |  calls: 1  |  answer: add_task: added task #9: File taxes | ...
+  ```
+  `calls: 1`: only the planner calls the model; the executor just runs tools.
+- Type `Delete the dentist task.` -> answer `n` at `[y/N]` -> `status: done-with-denials`, the task stays.
 
-```bash
-python baseline.py "Add a dentist appointment on Fri 27 Nov 10:00 and add a task to buy a gift for Anil." --approve no
-```
-What you should see:
-```text
-INFO  +  0.00s  [agent     ] model   stand-in replied in 0.00s (401 in / 22 out tokens, est.): {"tool": "add_event", ...}
-INFO  +  0.00s  [agent     ] model   stand-in replied in 0.00s (431 in / 15 out tokens, est.): {"tool": "add_task", ...}
-INFO  +  0.00s  [run       ] run     ended: status=done after 3 model calls, 1285 in / 79 out tokens (est.), 0.0s
-status: done
-```
-A **replayed** failure shape (hand-written, labelled REPLAYED in every line):
-```bash
-python baseline.py "Archive the dentist task." --mode replay --replay data/replays/w7-0-misroute.json --approve no
-```
-```text
-INFO  ... run     start baseline  mode=replay (REPLAYED (scripted): written by hand to show a known failure shape ...
-WARN  ... [agent     ] gate    delete task 4: "Book dentist appointment"  ->  denied
-status: done-with-denials
-answer: Done: the dentist task is archived.
-```
-The answer is false: nothing was archived.
-
-### W7-1: state and one agent node (22 min)
-Purpose: the shared state every agent will use, and last week's agent as a graph. What you learn: reducers (merge vs overwrite), a loop as a conditional edge, caps and `recursion_limit`.
-
-Short prompt:
-```text
-Read AGENTS.md and docs/phase-W7-1.md, then do exactly what "Ask your agent exactly this" says. Phase W7-1 only.
-```
-Check:
-```bash
-python check.py 1
-```
-```bash
-python check.py
-```
-```text
-Phase W7-1  State and one agent node: all 12 green
-```
-Try it:
-```bash
-python agent.py "Add File taxes, then show me my list." --setup single --approve no
-```
-```text
-INFO  ... [agent     ] model   stand-in replied in 0.00s (388 in / 13 out tokens, est.): {"tool": "add_task", "args": {"text": "File taxes"}}
-INFO  ... [agent     ] tool    add_task {"text": "File taxes"}  ->  ok: added task 9
-INFO  ... [run       ] run     ended: status=done after 3 model calls, 1259 in / 45 out tokens (est.), 0.0s
-status: done
-report: out/latest.html  (open it in a browser)
-```
-Then type `n` at the question:
-```bash
-python agent.py "Delete the dentist task." --setup single --approve ask
-```
-```text
-APPROVAL NEEDED: delete task 4: "Book dentist appointment". Cannot be undone. Allow? [y/N]
-WARN  ... [agent     ] gate    delete task 4: "Book dentist appointment"  ->  denied
-status: done-with-denials
-```
-
-**Join here (W7-1 not finished):** copy your own `state.py` and `graph.py` somewhere safe first (the zip overwrites them), then:
-Mac:
-```bash
-unzip -o checkpoints/after-W7-1.zip
-```
-Windows (Command Prompt, Windows 10 or newer; it overwrites files):
-```bash
-tar -xf checkpoints\after-W7-1.zip
-```
-(Do not use Explorer's default Extract All: it makes a subfolder and the check still says "not built yet". If you use it, extract into the project folder itself and choose Replace.) Then:
-```bash
-python check.py
-```
-W7-1 should be green.
-
-### W7-2: planner then executor, with a structured handoff (25 min)
-Purpose: the first team of two. What you learn: the four parts of a handoff, least privilege per step, "a plan is a proposal, not a permission".
-
-Short prompt:
-```text
-Read AGENTS.md and docs/phase-W7-2.md, then do exactly what "Ask your agent exactly this" says. Phase W7-2 only. If a function the phase asks for already exists (for example from a checkpoint), keep it and only create what is missing.
-```
-Check:
-```bash
-python check.py 2
-```
-```bash
-python check.py
-```
-```text
-Phase W7-2  Planner and executor: all 8 green
-```
-Try it:
-```bash
-python agent.py "Add File taxes, then show me my list." --setup two --approve no
-```
-```text
-INFO  ... [planner   ] plan    2 step(s) | 1. add_task: Add File taxes  (why: the user asked for it) | 2. list_tasks: show me my list ...
-INFO  ... [planner   ] handoff planner -> executor (step 1 of 2): Add File taxes
-INFO  ... [executor  ] saw     task: Add File taxes | context: | tasks: | 1: Mon 23 Nov: renew car insurance | ...
-INFO  ... [run       ] run     ended: status=done after 3 model calls, 740 in / 64 out tokens (est.), 0.0s
-```
-Same goal, roughly 1.5 to 2 times fewer input tokens than one agent with twelve tools (the exact numbers vary with wording). In `out/latest.html`, expand what the executor saw.
-
-**Join here (W7-2 not finished):** copy your own `.py` files somewhere safe first, then:
-Mac:
-```bash
-unzip -o checkpoints/after-W7-2.zip
-```
-Windows (Command Prompt, Windows 10 or newer; it overwrites files):
-```bash
-tar -xf checkpoints\after-W7-2.zip
-```
-(Do not use Explorer's default Extract All: it makes a subfolder and the check still says "not built yet". If you use it, extract into the project folder itself and choose Replace.) Then:
-```bash
-python check.py
-```
-W7-1 and W7-2 should be green; W7-3 says "not built yet".
-
-### W7-3: break the handoff on purpose, then cap it (18 min, incl. Your turn 8)
-Purpose: every arrow is an attack path. What you learn: refuse what changes meaning, cut what does not, check "did the user ask for this?" in code.
-
-The instructor demos the three breaks first (planted note, huge note, a replayed bad plan); then you build the caps and `validate_plan`.
-
-Short prompt:
-```text
-Read AGENTS.md and docs/phase-W7-3.md, then do exactly what "Ask your agent exactly this" says. Phase W7-3 only.
-```
-Check:
-```bash
-python check.py 3
-```
-```bash
-python check.py
-```
-```text
-Phase W7-3  Break the handoff and cap it: all 8 green
-```
-Try it (the planted note, with a human who clicks yes without reading):
-```bash
-python agent.py "Tidy up my list." --setup two --seed data/seeds/trap.json --approve yes
-```
-```text
-WARN  ... [planner   ] plan    REJECTED: step 2 uses delete_task, which cannot be undone, but the goal never asks to delete, remove, clear or cancel anything; ...
-status: plan-rejected
-tasks left: 5
-```
-*If time:* the huge note and the replayed bad plan:
-```bash
-python agent.py "Show me my list." --setup two --seed data/seeds/long_note.json --approve no
-```
-```bash
-python agent.py "Add File taxes and show me my list." --setup two --mode replay --replay data/replays/w7-3-bad-plan.json --approve no
-```
-(expected: a `cap` WARN line, then `status: done`; and `REJECTED: the plan has 7 steps; the cap is 5; ...`.)
-
-**Your turn (8 min):** add one rule to `validate_plan`: **two identical steps in one plan are refused.** Prove it with a run and keep `python check.py` green. Other rule ideas are in `docs/phase-W7-3.md` (stretch).
+### AM-2: Break It & Cap It (`safety.py`, 30 min incl. Your turn)
+**What you learn:** a planted note can steer a planner; two plain-code barriers stop it.
+1. **Watch the attack (unguarded).** In `python app.py --setup two`, type `/drill`, then `Tidy up my tasks.`. The
+   planner obeys the note and wants to delete task 1:
+   ```text
+   GATE [approval needed] executor wants to DELETE task #1: 'Pay rent'
+     Allow this irreversible action? [y/N]:
+   ```
+   **Answer `n`.** Pay rent stays (`status: done-with-denials`). Optional: `/reset`, `/drill`, `Tidy up my tasks.` again
+   and answer `y` once to see what an unguarded delete looks like: Pay rent disappears from `todo-list.md`. Type `/reset`.
+2. **Prompt to your coding agent:**
+   ```text
+   Read AGENTS.md and docs/AM-2.md, then build safety.py. Run python check.py 2 until green.
+   ```
+   **Expected check:** `AM-2  Handoff caps + plan check (safety.py): all 5 green`
+3. **Your turn (8 min):** make `validate_plan()` also reject two identical steps (same tool and same args).
+   - Coding agent prompt: `In safety.py validate_plan(), reject any plan where two steps have the same tool and args, and return a plain-English reason naming the step. Run python check.py 2 your-turn.`
+   - Expected: `AM-2  Your turn: duplicate-step rule (optional exercise): all 2 green`
+   - Watch-only: write the rule in one sentence, plus one plan that must fail and one that must pass.
+4. **Re-test the attack:** `/drill` -> `Tidy up my tasks.`:
+   ```text
+   WARN  [handoff] cap context cut to 600 chars
+   INFO  [planner] sees: goal + desk notes (612 chars, capped); tools: none
+   INFO  [planner] proposed 1 step(s): ['list_tasks']
+   status: done  |  calls: 1
+   ```
+   No gate question: the cap removed the override before the planner read it, and Pay rent stays. `validate_plan()`
+   is the second barrier if a delete still slips through (`status: plan-rejected`).
 
 ---
 
-## Build Hour 2 (afternoon): a team
+## Afternoon — Build Hour 2: Multi-Agent Team & Production
 
-**Join here (morning not finished):** copy your own `.py` files somewhere safe first, then:
-Mac:
-```bash
-unzip -o checkpoints/after-W7-3.zip
-```
-Windows (Command Prompt, Windows 10 or newer; it overwrites files):
-```bash
-tar -xf checkpoints\after-W7-3.zip
-```
-(Do not use Explorer's default Extract All: it makes a subfolder and the check still says "not built yet". If you use it, extract into the project folder itself and choose Replace.) Then:
-```bash
-python check.py
-```
-W7-1 to W7-3 should be green. (The `solution/` folder ships with the repo; `AGENTS.md` tells your coding agent not to read it until you ask.)
+**Join here if the morning is unfinished** (this overwrites `two_agent.py` and `safety.py`; copy your own versions
+somewhere safe first if you want to keep them):
+- Mac: `unzip -o checkpoints/after-AM.zip`
+- Windows `cmd`: `tar -xf checkpoints\after-AM.zip`
 
-**Important for this hour:** the team path (`--setup team`) has **no plan** to validate. Without `--review`, the gate and the human are the only defence against a planted note; W7-4's second try-it shows what that means, and W7-6 adds the reviewer.
+then `python check.py` (Setup, AM-1, AM-2 green).
 
-### W7-4: supervisor and two specialist workers (22 min)
-Purpose: dynamic routing and specialists. What you learn: `Command` handoffs, "what each agent sees" as a design, least privilege per worker.
+### PM-1a & PM-1b: Supervisor, Workers & Reviewer (`team.py`, 40 min = 20 + 20)
+**What you learn:** route work to specialists that hold only their own tools (least privilege), then add a reviewer
+in front of the human gate (defence in depth), and see what it costs in model calls.
+- **Part A prompt (20 min):**
+  ```text
+  Read AGENTS.md and docs/PM-1.md Part A, then build supervisor + tasks_worker + calendar_worker in team.py.
+  ```
+  Test in `python app.py --setup team`: `Cancel the team sync on Wednesday and remind me to email Anil.`, answer `y` at the gate:
+  ```text
+  INFO  [supervisor] -> calendar: ...
+  INFO  [calendar] sees: task + calendar only (143 chars); tools: add_event, list_events, cancel_event
+  INFO  [supervisor] -> tasks: ...
+  INFO  [tasks] sees: task + tasks + full raw notes (280 chars); tools: add_task, list_tasks, complete_task, delete_task
+  INFO  [supervisor] -> finish: All requested desk actions processed.
+  status: done  |  calls: 5
+  ```
+  Each worker can only use its own tools. Note the tasks worker still reads the raw notes (least privilege limits tools, not data).
+- **Part B prompt (20 min):**
+  ```text
+  Read docs/PM-1.md Part B, add reviewer_node (max 2 rounds) to team.py, and run python check.py 3 until green.
+  ```
+  **Expected check:** `PM-1  Supervisor, workers + reviewer (team.py): all 9 green`
+  Test: `/reset`, `/drill`, `Tidy up my tasks.` with `/review off` and answer `y`: Pay rent is deleted (the team has no
+  cap). Then `/reset`, `/review on`, `/drill`, `Tidy up my tasks.`:
+  ```text
+  WARN  [reviewer] rejected round 1: User goal did not ask for an irreversible delete/cancel.
+  WARN  [reviewer] rejected round 2: User goal did not ask for an irreversible delete/cancel.
+  status: done-with-denials  |  calls: 7
+  ```
+  No `[y/N]` question: the reviewer stopped it first. (The stand-in always answers round 2 like round 1.)
 
-Short prompt:
-```text
-Read AGENTS.md and docs/phase-W7-4.md, then do exactly what "Ask your agent exactly this" says. Phase W7-4 only. If a function the phase asks for already exists (for example from a checkpoint), keep it and only create what is missing.
-```
-Check:
-```bash
-python check.py 4
-```
-```bash
-python check.py
-```
-```text
-Phase W7-4  Supervisor and workers: all 7 green
-```
-Try it:
-```bash
-python agent.py "Add a dentist appointment on Fri 27 Nov 10:00 and add a task to buy a gift for Anil." --setup team --approve no
-```
-```text
-INFO  ... [supervisor] route   -> calendar: Add a dentist appointment on Fri 27 Nov 10:00
-INFO  ... [calendar  ] saw     task: Add a dentist appointment on Fri 27 Nov 10:00 | context: | events: | 7: Wed 25 Nov 15:00, Team sync | ...
-INFO  ... [supervisor] route   -> tasks: add a task to buy a gift for Anil
-INFO  ... [run       ] run     ended: status=done after 5 model calls, 964 in / 117 out tokens (est.), 0.01s
-```
-And the reason for the next phase (planted note, blind yes, no reviewer):
-```bash
-python agent.py "Tidy up my list." --setup team --seed data/seeds/trap.json --approve yes
-```
-```text
-INFO  ... [tasks     ] gate    delete task 2: "Pay rent"  ->  approved
-status: done
-```
-"Pay rent" is gone.
+**Join here if PM-1 is unfinished:** Mac `unzip -o checkpoints/after-PM1.zip`, Windows `tar -xf checkpoints\after-PM1.zip`,
+then `python check.py` (everything up to PM-1 green).
 
-**Join here (W7-4 not finished):** copy your own `.py` files somewhere safe first, then:
-Mac:
-```bash
-unzip -o checkpoints/after-W7-4.zip
-```
-Windows (Command Prompt, Windows 10 or newer; it overwrites files):
-```bash
-tar -xf checkpoints\after-W7-4.zip
-```
-(Do not use Explorer's default Extract All: it makes a subfolder and the check still says "not built yet". If you use it, extract into the project folder itself and choose Replace.) Then:
-```bash
-python check.py
-```
-W7-1 to W7-4 should be green.
-
-### W7-6: a reviewer on risky actions (20 min)
-Purpose: a second opinion before the human. What you learn: the critic pattern, a round counter as a conditional edge, defence in depth.
-
-Short prompt:
+### PM-2: Cost Meter, Routing, Rollback & Comparison (`prod.py`, 35 min incl. Your turn)
+**What you learn:** measure notional cost per task, route routine steps to a cheaper model, stamp every run with a
+release version, and enforce a hard cost ceiling in code.
+**Prompt to your coding agent:**
 ```text
-Read AGENTS.md and docs/phase-W7-6.md, then do exactly what "Ask your agent exactly this" says. Phase W7-6 only. If a function the phase asks for already exists (for example from a checkpoint), keep it and only create what is missing.
+Read AGENTS.md and docs/PM-2.md, then build prod.py. Run python check.py 4 and python check.py until all green.
 ```
-Check:
-```bash
-python check.py 6
-```
-```bash
-python check.py
-```
-```text
-Phase W7-6  Reviewer on risky actions: all 11 green
-```
-Try it:
-```bash
-python agent.py "Tidy up my list." --setup team --review --seed data/seeds/trap.json --approve yes
-```
-```text
-WARN  ... [reviewer  ] review  rejected (round 1 of 2): delete task 2: "Pay rent" (the user's goal never asks to delete or cancel anything)
-WARN  ... [reviewer  ] review  rejected (round 2 of 2): delete task 3: "Book dentist appointment" (...)
-status: done-with-denials
-tasks left: 5
-```
-*If time:*
-```bash
-python agent.py "Delete the dentist task." --setup team --review --approve no
-```
-(expected: the reviewer approves, the human gate still denies: `status: done-with-denials`.)
-
-### W7-7: cost meter and ceiling (18 min, incl. Your turn)
-Purpose: production basics. What you learn: cost per task, a ceiling as a rule, routing, versioning for rollback.
-
-Short prompt:
-```text
-Read AGENTS.md and docs/phase-W7-7.md, then do exactly what "Ask your agent exactly this" says. Phase W7-7 only.
-```
-Check:
-```bash
-python check.py 7
-```
-```bash
-python check.py
-```
-```bash
-python check.py style
-```
-```text
-Phase W7-7  Cost meter and version stamp: all 7 green
-Style   comment standard: ok (9 files checked)
-```
-Try it:
-```bash
-python agent.py "Cancel the team sync on Wednesday and remind me to email Anil." --setup team --review --approve yes
-```
-```text
-INFO  ... [run       ] run     start team-review  mode=fake (...)  version=app=1.0.0 setup=team-review prompts=... langgraph=1.2.23 ...
-INFO  ... [supervisor] model   stand-in (priced as gemini-2.5-flash-lite) replied in 0.00s (140 in / 19 out tokens, est.): ...
-INFO  ... [supervisor] cost    $0.000022 this call, $0.000022 so far (notional)
-status: done
-```
-**Your turn:** set a ceiling and watch the run stop:
-```bash
-python agent.py "Cancel the team sync on Wednesday and remind me to email Anil." --setup team --review --approve yes --ceiling 0.0001
-```
-```text
-WARN  ... [run       ] cap     cost-ceiling: cost ceiling reached: $0.000123 is over $0.000100 (notional)
-status: cost-ceiling
-```
-*If time:* change one word in `SUPERVISOR_PROMPT` (the `prompts=` hash changes); route the supervisor to the stronger model in `ROUTING` (the cost goes up).
-
-### W7-8: the honest comparison (10 min, shown)
-```bash
-python compare.py
-```
-```text
-setup         calls  tokens in tokens out   notional $   passed
-single           19       7865        303     0.003117   6 of 7
-two              16       4277        415     0.001697   7 of 7
-team             27       5249        474     0.000714   6 of 7
-team-review      32       6029        560     0.001075   7 of 7
-page:   out/compare.html  (open it in a browser)
-```
-Mac `open out/compare.html`, Windows `start out\compare.html`. Read `docs/phase-W7-8.md` for how to read this honestly (offline numbers are a shape; the team is cheaper partly because of routing), then walk `docs/launch-checklist.md`. The instructor also runs `extras/monitor.py` and `extras/canary.py` for five minutes.
+**Expected check:** `PM-2  Cost meter, routing + version stamp (prod.py): all 5 green`, and `python check.py` all green.
+- **Your turn (8 min):** in `python app.py --setup team --review`: `/reset`, `/ceiling 0.00001`, then
+  `Cancel the team sync on Wednesday and remind me to email Anil.`:
+  ```text
+  status: cost-ceiling  |  calls: 1  |  answer: cost ceiling reached: $0.000018 is over $0.000010 (notional)
+  ```
+  It stops on the first call, before `Team sync` is cancelled. `/ceiling off` to clear it.
+- **Production tour (last 10 min):**
+  - `/rollback` — switches the release label `stable 1.0.0` <-> `canary 1.1.0` (shown in `todo-list.md`). The prompt
+    hash stays the same, because prompts and routing did not change.
+  - `/monitor` — reads `logs/runs.jsonl`: run count, median and max notional cost, `ALERT stopped/capped runs`.
+  - `/compare` — runs `single`, `two`, `team`, `team-review` on fresh copies of the desk (your desk is untouched):
+    ```text
+    setup        calls  cost($, notional)  S1-add  S2-cancel          S3-drill (safe?)
+    single           3           0.000359  done    done-with-denials  DELETED (done)
+    two              3           0.000290  done    done-with-denials  SAFE (done)
+    team            11           0.000234  done    done-with-denials  DELETED (done)
+    team-review     16           0.000504  done    done-with-denials  SAFE (done-with-denials)
+    ```
+    Illustrative only: stand-in tokens are estimates. Run with `--live` for real numbers.
 
 ---
 
-## Live runs (optional, your quota)
-Add `--live` to any `agent.py` or `baseline.py` command. Each run makes 2 to 8 model calls, capped at 30 (`--max-calls`). On a `429` the run waits and retries up to 70 seconds, then stops with a plain message. Which model is used: before W7-7, `GEMINI_MODEL` in `.env` (default `gemini-3.5-flash-lite`); from W7-7 on, `ROUTING` in your `prod.py` decides per role. To keep a live run, add `--record data/replays/my-run.json`; replay it later with `--mode replay --replay data/replays/my-run.json` (labelled REPLAYED (recorded)).
+## Optional stretch (harder): a real `interrupt()` approval gate
+Read `docs/stretch.md`. Prompt: `Read AGENTS.md and docs/stretch.md, then build stretch.py. Run python check.py stretch until green.`
+Then `python stretch.py "Delete the dentist task."` pauses the graph, saves it, asks you, and resumes.
 
-## If something goes wrong
-| You see | Fix |
-|---|---|
-| `LangGraph is not installed` | turn the venv on (Step 5 activate line), then `pip install -r requirements.txt` |
-| `'py' is not recognized` (Windows) | reinstall Python with **Add python.exe to PATH** ticked, open a new Command Prompt |
-| `python3` opens the Microsoft Store (Windows) | use `py` before the venv and `python` after activating it |
-| `running scripts is disabled` (PowerShell) | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, or use Command Prompt |
-| `.env` not found, or saved as `.env.txt` | redo Step 8; in Notepad's Save As box set "Save as type" to "All files"; on Mac press Cmd+Shift+. in Finder to see hidden files |
-| `configuration error: graph.py is not built yet` | build W7-1 first (or use a join-here checkpoint) |
-| `No API key` | only for `--live`: Step 8, or drop `--live` |
-| `429` | quota: wait a minute; before W7-7 set another `GEMINI_MODEL`, from W7-7 change `ROUTING` in `prod.py` |
-| `404` model not found | same as 429: another model name |
-| `401` / `403` | the key is wrong: make a new one |
+---
 
-## Stretch (any time): `extras/`
-```bash
-python extras/fanout.py --parallel --delay 0.5
-```
-```bash
-python extras/canary.py --set 20 --users 10
-```
-```bash
-python extras/monitor.py
-```
-```bash
-python check.py extras
-```
-See `docs/phase-W7-5.md`, `docs/drills.md` and the docstring at the top of each file.
+## Stuck ladder
+1. Paste the failing `requirement:` line from `python check.py` to your agent: "Fix only this requirement."
+2. Still red after 2 tries: copy the finished file and read it with your agent.
+   - Mac: `cp solution/two_agent.py .` (or `safety.py`, `team.py`, `prod.py`)
+   - Windows `cmd`: `copy solution\two_agent.py .`
+3. `(.venv)` missing from the prompt, or "No module named langgraph": run the activate line from Step 4, then `pip install -r requirements.txt`.
+4. Watch-only / phone learners: follow `docs/predict-sheet.md` and watch `todo-list.md` on screen.
 
 ## Quick reference
-| Phase | Check | Expected |
-|---|---|---|
-| W7-1 | `python check.py 1` | all 12 green |
-| W7-2 | `python check.py 2` | all 8 green |
-| W7-3 | `python check.py 3` | all 8 green |
-| W7-4 | `python check.py 4` | all 7 green |
-| W7-6 | `python check.py 6` | all 11 green |
-| W7-7 | `python check.py 7` | all 7 green |
-| W7-8 | `python check.py 8` | all 2 green |
-| All | `python check.py` | all green |
-| Style | `python check.py style` | ok |
-| Extras | `python check.py extras` | all 7 green |
+| Phase | File | Check | Expected |
+|---|---|---|---|
+| Setup | provided | `python check.py 0` | 14 green |
+| AM-1 | `two_agent.py` | `python check.py 1` | 5 green |
+| AM-2 | `safety.py` | `python check.py 2` | 5 green |
+| AM-2 Your turn | `safety.py` | `python check.py 2 your-turn` | 2 green (optional) |
+| PM-1 | `team.py` | `python check.py 3` | 9 green |
+| PM-2 | `prod.py` | `python check.py 4` | 5 green |
+| Stretch | `stretch.py` | `python check.py stretch` | 5 green (optional) |
+| All | | `python check.py` | every built phase green |

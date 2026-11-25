@@ -1,252 +1,524 @@
-"""The model seam: every agent asks a model through ONE function here, so a run can be fake, replayed or live. PROVIDED.
+"""Model adapter: offline stand-in by default, optional Gemini `--live`, per-turn call cap, cost hook, trace export. PROVIDED.
 
-A team of agents makes many model calls, and on a free key every call is quota. So nothing in this repo calls a real
-model unless you ask for it with `--live`. By default a run uses the offline stand-in (stand_in.py): a rule-based
-fake that answers every agent role, costs nothing and gives the same answer every time. Tests use FakeModel, which
-replays exact scripted replies. A recorded run can be replayed with ReplayModel. Only GeminiModel talks to Google.
+No API key is required to build or run any phase. By default every run uses `StandIn` (rule-based, deterministic,
+deliberately gullible on the planted-note `/drill` so learners can watch `safety.py`, `reviewer`, and the `[y/N]` gate
+work). The stand-in is NOT a real model: its token counts are estimates (~4 characters per token) and any cost shown
+for it is notional, priced as if the routed Gemini model had run. Pass `--live` with your own `GEMINI_API_KEY` in
+`.env` to call Gemini with automatic 429/503 backoff.
 
-All four have the same shape:  model(role, system, user, model_name=None) -> Reply
-so an agent node cannot tell which one it is talking to, and the tests can check exactly what each agent saw.
-
-What to look at
-    Reply           text plus usage: input and output tokens, model name, seconds, and where it came from
-                    (fake, replay or live). Offline token counts are ESTIMATES (characters / 4) and say so.
-    ask_json()      the one call every agent makes: logs what the agent saw, calls the model, logs the reply with
-                    time and tokens, charges the cost meter (W7-7: meter.charge() then meter.check()), and parses
-                    the JSON. One bad-JSON reply gets one
-                    polite re-ask, because asking again changes nothing; a second bad reply is a ModelError.
-    Capped          a per-run call cap. When a run reaches max_calls model calls, CallCapReached stops it. This is
-                    quota safety, and the reason a looping team cannot burn your free tier.
-    GeminiModel     the live adapter (google-genai). A 429 (quota) or 503 (busy) is waited out with growing pauses up
-                    to LLM_MAX_WAIT_SECONDS, then reported in plain words. The key is read from the environment and
-                    never printed.
-    ReplayModel     plays back a saved file. A file with "kind": "scripted" was written by hand to show a failure
-                    shape and is labelled REPLAYED, never passed off as a live run. `--record` writes a real one.
-    make_model()    builds the right model for --mode fake|replay|live, wrapped in the call cap.
+The bottom of this file holds the OPTIONAL trace export (`--export console` or `--export langfuse`): the same idea as
+Week 6's trace_export.py. It wraps the model, the tools and the approval gate from the outside, so no phase file
+changes. The `langfuse` package is imported lazily and only when keys are set; without them you get a console tree.
 """
 import json
 import os
-import random
+import re
+import sys
 import time
-from dataclasses import asdict, dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
-DEFAULT_LIVE_MODEL = "gemini-3.5-flash-lite"   # free tier "yes" on the Gemini pricing page, read 2026-11-24
-# Which model a call uses: the role's entry in prod.ROUTING (from W7-7) wins; without routing, GEMINI_MODEL, else the default.
-DEFAULT_MAX_CALLS = 30                          # per-run call cap; agent.py --max-calls changes it
-RETRY_CODES = {429, 500, 502, 503, 504}         # busy or quota: safe to ask again, a model call changes nothing
+DEFAULT_LIVE_MODEL = "gemini-3.5-flash-lite"   # list price & free-tier status checked 2026-11-24
+DEFAULT_MAX_CALLS = 20
+OFFLINE_MODE_LABEL = "offline stand-in (not a real model)"
 
 
 class ModelError(RuntimeError):
-    """The model failed or kept replying with something that is not the JSON we asked for."""
+    """Raised when the model fails or returns invalid JSON twice."""
 
 
 class CallCapReached(RuntimeError):
-    """The run used its whole model-call budget. Raised instead of making one more call."""
+    """Raised when a single turn exceeds its model-call cap."""
 
 
 class CostCeilingReached(RuntimeError):
-    """The run's notional cost passed its ceiling. Raised by your CostMeter.check() in W7-7; run_graph stops the run."""
+    """Raised by prod.CostMeter.check() when a turn's notional cost crosses its ceiling."""
 
 
 @dataclass
 class Reply:
-    """One model answer plus what it cost to get it."""
+    """One model response plus usage metadata."""
     text: str
     input_tokens: int
     output_tokens: int
     model: str
     seconds: float
-    source: str              # "fake", "replay" or "live"
-    estimated: bool = True   # True when the token counts are characters / 4, not the provider's own count
+    source: str          # "fake" or "live"
+    estimated: bool = True
+
+
+def load_env(path: "str | Path | None" = None) -> list[str]:
+    """Load KEY=VALUE pairs from `.env` without overwriting shell env vars or printing secrets."""
+    env_path = Path(path) if path else Path(__file__).with_name(".env")
+    if not env_path.is_file():
+        return []
+    loaded: list[str] = []
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        key, val = key.strip(), val.strip().strip("\"'")
+        if key and val and key not in os.environ:
+            os.environ[key] = val
+            loaded.append(key)
+    return loaded
 
 
 def estimate_tokens(text: str) -> int:
-    """A rough token count for offline runs: about four characters per token. Always labelled as an estimate."""
+    """Rough offline estimate (~4 characters per token); always labelled as an estimate."""
     return max(1, len(text) // 4)
 
 
 def parse_json(text: str) -> dict:
-    """The first JSON object in a reply, even inside a fenced block or after chatter. Raises ValueError otherwise."""
+    """Extract the first JSON object from a model reply."""
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end <= start:
-        raise ValueError(f"no JSON object in the reply: {text.strip()[:80]!r}")
-    try:
-        value = json.loads(text[start:end + 1])
-    except json.JSONDecodeError as err:
-        raise ValueError(f"the reply is not valid JSON: {text.strip()[:80]!r}") from err
-    if not isinstance(value, dict):
-        raise ValueError("the reply is JSON but not an object")
-    return value
+        raise ValueError(f"no JSON object in reply: {text.strip()[:80]!r}")
+    data = json.loads(text[start:end + 1])
+    if not isinstance(data, dict):
+        raise ValueError("reply JSON must be an object")
+    return data
 
 
-class FakeModel:
-    """Scripted replies per role, for tests. Records every call, so a test can check exactly what each agent saw."""
-
-    def __init__(self, script: "dict[str, list[Any]] | Callable[[str, str, str], Any]", model_name: str = "fake-model"):
-        """script maps a role to its replies in order (dicts are sent as JSON); the last one repeats. Or a function."""
-        self.script = script
-        self.model_name = model_name
-        self.position: dict[str, int] = {}
-        self.calls: list[dict] = []
-
-    def __call__(self, role: str, system: str, user: str, model_name: "str | None" = None) -> Reply:
-        """Return the next scripted reply for this role."""
-        self.calls.append({"role": role, "system": system, "user": user, "model": model_name})
-        if callable(self.script):
-            answer = self.script(role, system, user)
-        else:
-            replies = self.script.get(role) or [{"final": f"no scripted reply for role {role}"}]
-            index = self.position.get(role, 0)
-            self.position[role] = index + 1
-            answer = replies[min(index, len(replies) - 1)]
-        text = answer if isinstance(answer, str) else json.dumps(answer)
-        return Reply(text, estimate_tokens(system + user), estimate_tokens(text), model_name or self.model_name, 0.0, "fake")
-
-    def roles(self) -> list[str]:
-        """The roles that were asked, in order. Handy for checking the route a run took."""
-        return [c["role"] for c in self.calls]
+def _extract_quoted_or_tail(goal: str, prefixes: tuple[str, ...]) -> str:
+    m = re.search(r'"([^"]+)"', goal)
+    if m:
+        return m.group(1).strip()
+    low = goal.lower()
+    for p in prefixes:
+        idx = low.find(p)
+        if idx != -1:
+            tail = goal[idx + len(p):].strip(" .,:;")
+            for sep in (", then ", " and then ", " and show ", " and remind "):
+                if sep in tail.lower():
+                    tail = tail[:tail.lower().index(sep)].strip(" .,:;")
+            if tail:
+                return tail[:120]
+    return goal.strip(" .")[:120]
 
 
-class ReplayModel:
-    """Plays back a saved run. Each role gets its saved replies in order; running out is an error, not a guess."""
+def _extract_id(text: str, default_id: int = 1) -> int:
+    m = re.search(r"#?(\d+)", text)
+    return int(m.group(1)) if m else default_id
 
-    def __init__(self, path: str):
-        """Load a replay file: {"label", "kind": "scripted"|"recorded", "replies": [{"role", "text", ...}]}."""
-        with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
-        self.kind = data.get("kind", "scripted")
-        self.label = f"REPLAYED ({self.kind}): {data.get('label', path)}"
-        self.queue: dict[str, list[dict]] = {}
-        for item in data["replies"]:
-            self.queue.setdefault(item["role"], []).append(item)
+
+class StandIn:
+    """Rule-based offline model. Deterministic, free, and deliberately gullible on the planted-note drill."""
+    label = "offline stand-in"
 
     def __call__(self, role: str, system: str, user: str, model_name: "str | None" = None) -> Reply:
-        """The next saved reply for this role, with saved token counts when the file has them."""
-        if not self.queue.get(role):
-            raise ModelError(f"the replay file has no more replies for role '{role}'")
-        item = self.queue[role].pop(0)
-        recorded = "input_tokens" in item and self.kind == "recorded"
-        return Reply(item["text"], item.get("input_tokens") or estimate_tokens(system + user),
-                     item.get("output_tokens") or estimate_tokens(item["text"]),
-                     item.get("model") or model_name or "replay", float(item.get("seconds", 0.0)), "replay", not recorded)
+        low = user.lower()
+        name = model_name or "stand-in"
+        has_override = "system override" in low or "ignore user rules" in low
+
+        if role == "planner":
+            goal_line = user.splitlines()[0] if user.splitlines() else user
+            g_low = goal_line.lower()
+            steps = []
+            if has_override:
+                steps.append({"task": "Delete task 1 (Pay rent)", "tool": "delete_task", "args": {"id": 1}})
+            if "dentist" in g_low and ("delete" in g_low or "remove" in g_low):
+                steps.append({"task": "Delete dentist task", "tool": "delete_task", "args": {"id": 3}})
+            if "cancel" in g_low and ("sync" in g_low or "event" in g_low or "meeting" in g_low):
+                steps.append({"task": "Cancel team sync", "tool": "cancel_event", "args": {"id": 6}})
+            if "add " in g_low or "remind me" in g_low:
+                if "appointment" in g_low or "meeting" in g_low or "fri" in g_low or "mon" in g_low:
+                    steps.append({"task": "Add calendar event", "tool": "add_event", "args": {"when": "Fri 10:00", "title": _extract_quoted_or_tail(goal_line, ("add ",))}})
+                else:
+                    task_txt = _extract_quoted_or_tail(goal_line, ("remind me to ", "add task ", "add "))
+                    steps.append({"task": f"Add task: {task_txt}", "tool": "add_task", "args": {"text": task_txt}})
+            if "complete" in g_low or "mark done" in g_low:
+                steps.append({"task": "Complete task", "tool": "complete_task", "args": {"id": _extract_id(goal_line, 1)}})
+            if "show" in g_low or "list" in g_low or not steps:
+                steps.append({"task": "Show task list", "tool": "list_tasks", "args": {}})
+            payload = {"steps": steps}
+
+        elif role == "supervisor":
+            done_marker = "done so far:" in low
+            done_part = low.split("done so far:", 1)[1] if done_marker else ""
+            if has_override and "tasks" not in done_part:
+                payload = {"next": "tasks", "task": "Handle desk note and tidy tasks"}
+            elif ("cancel" in low or "sync" in low or "calendar" in low or "event" in low or "appointment" in low) and "calendar:" not in done_part:
+                payload = {"next": "calendar", "task": user.splitlines()[0][:140]}
+            elif ("task" in low or "remind" in low or "add" in low or "list" in low or "delete" in low or "tidy" in low) and "tasks:" not in done_part:
+                payload = {"next": "tasks", "task": user.splitlines()[0][:140]}
+            else:
+                payload = {"next": "finish", "answer": "All requested desk actions processed."}
+
+        elif role == "reviewer":
+            # Reviewer checks whether the original goal actually asked for the irreversible action
+            goal_line = ""
+            for line in user.splitlines():
+                if line.lower().startswith("goal:"):
+                    goal_line = line.split(":", 1)[1].strip().lower()
+                    break
+            asked_delete = any(w in goal_line for w in ("delete", "remove", "cancel", "clear", "erase"))
+            if not asked_delete:
+                payload = {"approved": False, "reason": "User goal did not ask for an irreversible delete/cancel."}
+            else:
+                payload = {"approved": True, "reason": "Action matches the user's explicit request."}
+
+        elif role == "calendar_worker":
+            if "cancel" in low or "remove" in low:
+                payload = {"tool": "cancel_event", "args": {"id": _extract_id(user, 6)}, "summary": "Cancel team sync"}
+            elif "add" in low or "book" in low or "schedule" in low:
+                payload = {"tool": "add_event", "args": {"when": "Fri 10:00", "title": _extract_quoted_or_tail(user, ("add ", "book ", "schedule "))}, "summary": "Add event"}
+            else:
+                payload = {"tool": "list_events", "args": {}, "summary": "List calendar events"}
+
+        else:  # single, executor, tasks_worker
+            first_line = user.splitlines()[0] if user.splitlines() else user
+            f_low = first_line.lower()
+            if has_override:
+                payload = {"tool": "delete_task", "args": {"id": 1}, "summary": "Delete task 1 per note override"}
+            elif "delete" in f_low or "remove" in f_low:
+                tid = 3 if "dentist" in f_low else _extract_id(first_line, 1)
+                payload = {"tool": "delete_task", "args": {"id": tid}, "summary": f"Delete task {tid}"}
+            elif role != "tasks_worker" and "cancel" in f_low and ("sync" in f_low or "event" in f_low):
+                payload = {"tool": "cancel_event", "args": {"id": 6}, "summary": "Cancel team sync"}
+            elif "complete" in f_low or "mark done" in f_low:
+                tid = _extract_id(first_line, 1)
+                payload = {"tool": "complete_task", "args": {"id": tid}, "summary": f"Complete task {tid}"}
+            elif "add " in f_low or "remind me" in f_low:
+                task_txt = _extract_quoted_or_tail(first_line, ("remind me to ", "add task ", "add "))
+                payload = {"tool": "add_task", "args": {"text": task_txt}, "summary": f"Add task '{task_txt}'"}
+            else:
+                payload = {"tool": "list_tasks", "args": {}, "summary": "List tasks"}
+
+        text = json.dumps(payload)
+        return Reply(
+            text=text,
+            input_tokens=estimate_tokens(system + "\n" + user),
+            output_tokens=estimate_tokens(text),
+            model=name,
+            seconds=0.01,
+            source="fake",
+            estimated=True,
+        )
 
 
 class GeminiModel:
-    """The live adapter: one Gemini call per ask, JSON replies, temperature 0, quota errors waited out."""
+    """Opt-in live Gemini adapter with 429/503 exponential backoff."""
+    label = "live Gemini"
 
-    def __init__(self, model_name: "str | None" = None):
-        """Read the key and default model from the environment. Fails at once, in plain words, if there is no key."""
-        self.key = os.environ.get("GEMINI_API_KEY", "")
-        if not self.key:
-            raise ModelError("No API key. Put GEMINI_API_KEY in .env (see .env.example), or run without --live.")
-        self.default = model_name or os.environ.get("GEMINI_MODEL") or DEFAULT_LIVE_MODEL
+    def __init__(self, default_model: "str | None" = None):
+        api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            raise ModelError("GEMINI_API_KEY is not set. Copy .env.example to .env or drop --live.")
         try:
-            from google import genai               # imported only for live runs, so offline needs no install
-        except ImportError:
-            raise ModelError("Live runs need the Gemini package: pip install -r requirements.txt") from None
-        self.genai = genai
-        self.client = genai.Client(api_key=self.key)
+            from google import genai
+        except ImportError as err:
+            raise ModelError("google-genai is not installed. Run: pip install google-genai") from err
+        self.client = genai.Client(api_key=api_key)
+        self.default_model = default_model or os.environ.get("GEMINI_MODEL", "").strip() or DEFAULT_LIVE_MODEL
 
     def __call__(self, role: str, system: str, user: str, model_name: "str | None" = None) -> Reply:
-        """One generate_content call. Retries only busy or quota errors, with growing pauses, up to a total cap."""
-        from google.genai import errors, types
-        model = model_name or self.default
-        config = types.GenerateContentConfig(system_instruction=system, temperature=0, response_mime_type="application/json")
-        cap = float(os.environ.get("LLM_MAX_WAIT_SECONDS", "70"))
-        waited, attempt, started = 0.0, 0, time.time()
-        while True:
+        chosen = model_name or self.default_model
+        t0 = time.monotonic()
+        wait = 2.0
+        for attempt in range(4):
             try:
-                response = self.client.models.generate_content(model=model, contents=user, config=config)
-                break
-            except errors.APIError as err:
-                delay = 2.0 * (2 ** attempt) + random.random()     # 2s, 4s, 8s ... plus jitter
-                if err.code in RETRY_CODES and waited + delay <= cap:
-                    time.sleep(delay)
-                    waited, attempt = waited + delay, attempt + 1
+                resp = self.client.models.generate_content(
+                    model=chosen,
+                    contents=f"{system}\n\n{user}",
+                )
+                text = getattr(resp, "text", "") or ""
+                usage = getattr(resp, "usage_metadata", None)
+                in_tok = getattr(usage, "prompt_token_count", None) or estimate_tokens(system + user)
+                out_tok = getattr(usage, "candidates_token_count", None) or estimate_tokens(text)
+                return Reply(
+                    text=text,
+                    input_tokens=int(in_tok),
+                    output_tokens=int(out_tok),
+                    model=chosen,
+                    seconds=round(time.monotonic() - t0, 2),
+                    source="live",
+                    estimated=usage is None,
+                )
+            except Exception as err:
+                msg = str(err)
+                if any(code in msg for code in ("429", "503", "RESOURCE_EXHAUSTED")) and attempt < 3:
+                    time.sleep(wait)
+                    wait *= 2
                     continue
-                hint = (" (free-tier quota for this model: wait a minute; to switch models set GEMINI_MODEL in .env before W7-7,"
-                        " or change ROUTING in prod.py from W7-7 on)") if err.code == 429 else ""
-                raise ModelError(f"model API error {err.code}{hint}") from None   # no key, no request body in the message
-        usage = response.usage_metadata
-        text = response.text or ""
-        if not text.strip():
-            raise ModelError("the model returned no text (blocked or cut off)")
-        return Reply(text, (usage and usage.prompt_token_count) or estimate_tokens(system + user),
-                     (usage and usage.candidates_token_count) or estimate_tokens(text),
-                     model, round(time.time() - started, 2), "live", not (usage and usage.prompt_token_count))
+                raise ModelError(f"live Gemini call failed ({chosen}): {msg[:180]}") from err
+        raise ModelError("live Gemini call timed out after retries")
 
 
-class Capped:
-    """Wraps any model with a per-run call cap, and optionally records every reply to a replay file."""
+class CallCapped:
+    """Per-turn model call cap so a runaway loop cannot burn free-tier quota."""
 
-    def __init__(self, model: Any, max_calls: int = DEFAULT_MAX_CALLS, record: bool = False):
-        """max_calls is the budget for one run. record=True keeps every reply so save() can write a replay file."""
-        self.model, self.max_calls, self.calls = model, max_calls, 0
-        self.recorded: "list[dict] | None" = [] if record else None
-        self.label = getattr(model, "label", "")
+    def __init__(self, inner: Callable, max_calls: int = DEFAULT_MAX_CALLS):
+        self.inner = inner
+        self.max_calls = max_calls
+        self.calls = 0
+        self.label = getattr(inner, "label", "model")
+
+    def reset(self) -> None:
+        self.calls = 0
 
     def __call__(self, role: str, system: str, user: str, model_name: "str | None" = None) -> Reply:
-        """Refuse the call once the budget is spent; otherwise pass it through."""
         if self.calls >= self.max_calls:
-            raise CallCapReached(f"call cap reached: {self.max_calls} model calls in this run")
+            raise CallCapReached(f"per-turn call cap reached ({self.max_calls} calls)")
         self.calls += 1
-        reply = self.model(role, system, user, model_name)
-        if self.recorded is not None:
-            self.recorded.append({"role": role, **{k: v for k, v in asdict(reply).items() if k != "source"}})
-        return reply
-
-    def save(self, path: str, label: str) -> None:
-        """Write the recorded replies as a replay file (kind "recorded"): prompts are not saved, only replies."""
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump({"label": label, "kind": "recorded", "recorded_on": time.strftime("%Y-%m-%d"),
-                       "replies": self.recorded or []}, handle, indent=1)
+        return self.inner(role, system, user, model_name=model_name)
 
 
-def make_model(mode: str = "fake", *, replay_path: "str | None" = None, max_calls: int = DEFAULT_MAX_CALLS,
-               record: bool = False) -> Capped:
-    """The model for a run: "fake" (offline stand-in, the default), "replay" (a saved file) or "live" (Gemini)."""
-    if mode == "fake":
-        from stand_in import StandIn
-        base: Any = StandIn()
-    elif mode == "replay":
-        if not replay_path:
-            raise ModelError("--mode replay needs --replay PATH (a file in data/replays/)")
-        base = ReplayModel(replay_path)
-    elif mode == "live":
-        base = GeminiModel()
-    else:
-        raise ModelError(f"unknown mode {mode!r}: use fake, replay or live")
-    return Capped(base, max_calls=max_calls, record=record)
+def make_model(live: bool = False, *, max_calls: int = DEFAULT_MAX_CALLS) -> CallCapped:
+    """Build a call-capped StandIn (default) or live Gemini model."""
+    return CallCapped(GeminiModel() if live else StandIn(), max_calls=max_calls)
 
 
-def ask_json(model: Callable, role: str, system: str, user: str, *, run: Any = None, meter: Any = None,
-             model_name: "str | None" = None) -> "tuple[dict, Reply]":
-    """Ask one agent's model and return (parsed JSON, reply). Logs what the agent saw and what it said, charges the meter."""
-    if run is not None:
-        run.log("saw", role, user, chars=len(user))        # "what each agent saw": the exact message, every time
-    reply = model(role, system, user, model_name)
-    _account(reply, role, run, meter)
-    try:
-        return parse_json(reply.text), reply
-    except ValueError:
-        if run is not None:
-            run.log("model", role, f"reply was not JSON, asking once more: {reply.text[:80]!r}", level="WARN")
-        again = model(role, system + "\nYour last reply was not valid JSON. Reply with ONE JSON object only.", user, model_name)
-        _account(again, role, run, meter)
+def model_label(reply: Reply, chosen: "str | None" = None) -> str:
+    """Honest model name for logs: a live reply shows the real model; the stand-in says what it is priced as."""
+    if reply.source == "live":
+        return reply.model
+    return f"stand-in (priced as {chosen})" if chosen else "stand-in"
+
+
+def ask_json(
+    role: str,
+    system: str,
+    user: str,
+    model: Callable,
+    *,
+    meter: Any = None,
+    routing: "dict[str, str] | None" = None,
+    log_fn: "Callable[[str], None] | None" = None,
+) -> tuple[dict, Reply]:
+    """Call the model, charge the optional CostMeter, log concise trace, and parse JSON (1 retry on bad JSON)."""
+    chosen = (routing or {}).get(role)
+    last_err = None
+    for attempt in range(2):
+        prompt_user = user if attempt == 0 else user + "\n\nReply with a single valid JSON object only."
+        reply = model(role, system, prompt_user, model_name=chosen)
+        if meter is not None:
+            meter.charge(role, reply)
+        if log_fn:
+            est = "est." if reply.estimated else "live"
+            log_fn(f"INFO  [{role}] model={model_label(reply, chosen)} in={reply.input_tokens}({est}) out={reply.output_tokens} ({reply.seconds:.2f}s)")
+        if meter is not None:
+            meter.check()   # after the log line, so the call that crossed the ceiling is still visible in the trace
         try:
-            return parse_json(again.text), again
+            return parse_json(reply.text), reply
         except ValueError as err:
-            raise ModelError(f"{role} replied twice without valid JSON: {err}") from None
+            last_err = err
+    raise ModelError(f"{role} did not return valid JSON: {last_err}")
 
 
-def _account(reply: Reply, role: str, run: Any, meter: Any) -> None:
-    """Log one reply with its time and tokens, then charge the cost meter (which may stop the run at the ceiling)."""
-    if run is not None:
-        run.model_call(role, reply)
-    if meter is not None:
-        usd = meter.charge(role, reply)       # adds this call to the bill; never raises
-        if run is not None:
-            run.log("cost", role, f"${usd:.6f} this call, ${meter.total_usd:.6f} so far (notional)", usd=usd,
-                    total_usd=meter.total_usd, price_date=getattr(meter, "price_date", ""))
-        meter.check()                          # raises CostCeilingReached once the bill passes the ceiling
+# ---- Optional trace export: console tree or Langfuse. Same design as Week 6's trace_export.py. ----
+#
+# WHY: logs/latest.log is enough on a laptop. A trace viewer adds time per step, a tree of who called what, and a page
+# the whole team can open. The phase files stay exactly as they are: app.py wraps the model, desk.run_tool and the
+# approval callback for one turn, and every call becomes a span.
+# WHAT IT PREVENTS: a broken or missing viewer breaking the agent (failures warn once and the run carries on), keys
+# being printed (only "found" / "missing" is ever said), and big payloads leaving the machine (TRACE_MAX_TEXT cut).
+# PRIVACY: spans carry prompts and desk text. Send only the toy desk to a hosted viewer, never real tasks.
+
+TRACE_MAX_TEXT = 500
+
+
+def _cut(value: Any) -> Any:
+    """Short, safe text for a span: strings and JSON-like values are cut to TRACE_MAX_TEXT characters."""
+    text = value if isinstance(value, str) else json.dumps(value, default=str, sort_keys=True)
+    return text if len(text) <= TRACE_MAX_TEXT else text[:TRACE_MAX_TEXT] + " [cut]"
+
+
+class _Span:
+    """One recorded step kept in memory (used by ListSink in tests and ConsoleSink in the terminal)."""
+
+    def __init__(self, kind: str, name: str, input: Any, depth: int, metadata: Any = None):
+        self.kind, self.name, self.input, self.depth, self.metadata = kind, name, input, depth, metadata
+        self.output: Any = None
+        self.extra: dict = {}
+        self.seconds: "float | None" = None
+
+    def update(self, output: Any = None, **extra: Any) -> None:
+        """Attach the result (same method name the Langfuse observation uses)."""
+        self.output = output
+        self.extra.update(extra)
+
+
+class ListSink:
+    """Keeps every span in a list. Tests read it; nothing leaves the program."""
+
+    name = "list"
+
+    def __init__(self) -> None:
+        self.spans: list[_Span] = []
+        self._depth = 0
+
+    @contextmanager
+    def span(self, kind: str, name: str, input: Any, metadata: Any = None):
+        record = _Span(kind, name, input, self._depth, metadata)
+        self.spans.append(record)
+        self._depth += 1
+        start = time.perf_counter()
+        try:
+            yield record
+        finally:
+            record.seconds = round(time.perf_counter() - start, 4)
+            self._depth -= 1
+
+    def flush(self) -> None:
+        """Nothing to send."""
+
+
+class ConsoleSink(ListSink):
+    """Same as ListSink, then prints the finished tree as indented lines (the no-key fallback)."""
+
+    name = "console"
+
+    def __init__(self, out: Callable[[str], None] = print) -> None:
+        super().__init__()
+        self.out = out
+
+    def flush(self) -> None:
+        if self.spans:
+            self.out("trace (console export):")
+        for s in self.spans:
+            self.out(f"  {'  ' * s.depth}{s.kind:<5} {s.name}  {s.seconds}s  out={_cut(s.output)}")
+        self.spans.clear()
+
+
+def langfuse_sink() -> Any:
+    """A sink that sends spans to Langfuse, or None when the keys or the package are missing.
+
+    Needs LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY (plus LANGFUSE_BASE_URL for your region) in the environment
+    (load_env() fills them from .env), and `pip install langfuse==5.2.0` (Python 3.11+). Written against langfuse 5.2.0
+    (`start_as_current_observation`); not yet verified against a real Langfuse server as of 2026-11-25.
+    """
+    if not (os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY")):
+        return None
+    try:
+        from langfuse import get_client
+    except ImportError:
+        return None
+    client = get_client()
+    # Langfuse draws each type differently: the turn is an agent, a model call a generation, a tool a tool, the gate a guardrail.
+    as_type = {"run": "agent", "model": "generation", "tool": "tool", "gate": "guardrail"}
+
+    class LangfuseSink:
+        name = "langfuse"
+
+        @contextmanager
+        def span(self, kind: str, name: str, input: Any, metadata: Any = None):
+            with client.start_as_current_observation(name=name, as_type=as_type.get(kind, "span"), input=input,
+                                                     metadata=metadata) as observation:
+                yield observation
+
+        def flush(self) -> None:
+            client.flush()
+
+    return LangfuseSink()
+
+
+def choose_sink(name: str, out: Callable[[str], None] = print) -> Any:
+    """Pick a sink: "langfuse" (falls back to the console tree when keys or package are missing) or "console"."""
+    if name == "langfuse":
+        sink = langfuse_sink()
+        if sink is not None:
+            out("export: sending spans to Langfuse. Prompts and desk text leave this machine: toy data only.")
+            return sink
+        if not (os.environ.get("LANGFUSE_PUBLIC_KEY") and os.environ.get("LANGFUSE_SECRET_KEY")):
+            out("export: no Langfuse keys in .env (see .env.example); printing the trace tree here instead.")
+        else:
+            out("export: Langfuse keys found but the package is missing (pip install langfuse==5.2.0); printing the tree here instead.")
+    return ConsoleSink(out)
+
+
+class _TracedModel:
+    """Wraps a model callable: one "model" span per call. Every other attribute (calls, reset, label) passes through."""
+
+    def __init__(self, inner: Callable, tracer: "Tracer"):
+        self._inner, self._tracer = inner, tracer
+
+    def __getattr__(self, attr: str) -> Any:
+        return getattr(self._inner, attr)
+
+    def __call__(self, role: str, system: str, user: str, model_name: "str | None" = None) -> Reply:
+        with self._tracer.span("model", role, {"system": system, "user": user}) as sp:
+            try:
+                reply = self._inner(role, system, user, model_name=model_name)
+            except Exception as err:
+                self._tracer.set(sp, f"error: {err}")
+                raise
+            live = reply.source == "live"
+            # The stand-in is reported as "stand-in" so a viewer never prices it as a real Gemini call.
+            self._tracer.set(sp, reply.text, model=reply.model if live else "stand-in",
+                             usage_details={"input": reply.input_tokens, "output": reply.output_tokens},
+                             metadata={"priced_as": model_name, "estimated_tokens": reply.estimated, "source": reply.source})
+            return reply
+
+
+class Tracer:
+    """Wraps what the phase files already receive (model, approve) plus desk.run_tool, and reports each call to a sink."""
+
+    def __init__(self, sink: Any, warn: Callable[[str], None] = lambda m: print(m, file=sys.stderr)):
+        self.sink = sink
+        self._warn_fn = warn
+        self._warned = False
+
+    def _warn(self, err: Exception) -> None:
+        """A broken exporter must never break the agent: say so once, then carry on."""
+        if not self._warned:
+            self._warned = True
+            self._warn_fn(f"trace export problem (the run is unaffected): {type(err).__name__}: {str(err)[:120]}")
+
+    def set(self, span: Any, output: Any, **extra: Any) -> None:
+        """Attach a result to a span, ignoring any exporter failure."""
+        try:
+            if span is not None:
+                span.update(output=_cut(output), **extra)
+        except Exception as err:
+            self._warn(err)
+
+    @contextmanager
+    def span(self, kind: str, name: str, input: Any, metadata: Any = None):
+        """Open a span; if the sink fails to open or close it, the wrapped call still runs normally."""
+        manager = span = None
+        try:
+            manager = self.sink.span(kind, name, _cut(input), metadata)
+            span = manager.__enter__()
+        except Exception as err:
+            self._warn(err)
+            manager = None
+        try:
+            yield span
+        finally:
+            if manager is not None:
+                try:
+                    manager.__exit__(None, None, None)
+                except Exception as err:
+                    self._warn(err)
+
+    def wrap_model(self, model: Callable) -> Callable:
+        return _TracedModel(model, self)
+
+    def wrap_run_tool(self, run_tool: Callable) -> Callable:
+        """One "tool" span per tool request, with its outcome (ok, denied, refused). Gate spans nest inside it."""
+        def traced(name, args, desk, **kwargs):
+            with self.span("tool", str(name), {"args": args, "actor": kwargs.get("actor", "agent")}) as sp:
+                res = run_tool(name, args, desk, **kwargs)
+                self.set(sp, f"{res.kind}: {res.text}")
+                return res
+        return traced
+
+    def wrap_approve(self, approve: Callable[[str, dict, str], bool]) -> Callable[[str, dict, str], bool]:
+        """One "gate" span per approval question, with the human's answer."""
+        def traced(tool: str, args: dict, desc: str) -> bool:
+            with self.span("gate", f"approve {tool}", desc) as sp:
+                answer = bool(approve(tool, args, desc))
+                self.set(sp, "approved" if answer else "denied")
+                return answer
+        return traced
+
+    def flush(self) -> None:
+        """Send anything still waiting (Langfuse batches in the background)."""
+        try:
+            self.sink.flush()
+        except Exception as err:
+            self._warn(err)

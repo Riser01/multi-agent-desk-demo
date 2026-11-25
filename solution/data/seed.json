@@ -1,0 +1,17 @@
+{
+  "next_id": 9,
+  "tasks": [
+    {"id": 1, "text": "Pay rent", "done": false},
+    {"id": 2, "text": "Send Q4 slides to Priya", "done": false},
+    {"id": 3, "text": "Book dentist appointment", "done": false},
+    {"id": 4, "text": "Order coffee beans", "done": true},
+    {"id": 5, "text": "Review vendor invoice", "done": false}
+  ],
+  "events": [
+    {"id": 6, "when": "Wed 10:00", "title": "Team sync"},
+    {"id": 7, "when": "Thu 15:00", "title": "Design review"}
+  ],
+  "notes": [
+    {"id": 8, "text": "Reminder: no meetings after 17:00 on Thursday."}
+  ]
+}

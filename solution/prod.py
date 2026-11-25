@@ -1,91 +1,126 @@
-"""The production layer: a cost meter with a ceiling, model routing per role, and a version stamp on every run. W7-7.
+"""PM-2 reference solution: a notional cost meter with a hard ceiling, per-role model routing, and a release stamp.
 
-A team multiplies model calls, so it multiplies the bill, and nobody sees a bill per task unless code adds it up.
-The meter here prices every call as it happens (tokens x list price) and keeps the total for the run. The CEILING
-turns that number into a rule: once the run's cost passes it, CostMeter.check() raises CostCeilingReached and
-run_graph stops the run with status "cost-ceiling". A runaway loop costs at most the ceiling, not your month.
+WHAT IT IS
+    * PRICES / CostMeter   turns every model call's tokens into notional US dollars and stops the turn (status
+                           "cost-ceiling") the moment the total goes over the ceiling you set with /ceiling.
+    * ROUTING              routine roles (supervisor, workers, executor) go to the cheaper model; judgement roles
+                           (planner, reviewer, single) go to the stronger one.
+    * version_stamp()      labels every run with its release (stable 1.0.0 / canary 1.1.0) and a short hash of what
+                           actually drives behaviour: the prompts, the routing table, the setup and the LangGraph version.
 
-Routing is the cheap half of cost control: not every role needs the same model. Routing decisions and single tool
-calls go to the cheapest model; the planner and the reviewer, where judgement matters, get a stronger one. The
-version stamp makes every run answer "which prompts, which models, which code?", which is what you need the day a
-change makes things worse and you have to roll back.
+WHY IT IS NEEDED
+    A team makes 5 to 7 model calls where one agent makes 1, so cost has to be measured, not guessed, and capped in code
+    (a model cannot be trusted to stop itself). The stamp answers "which version produced this run?" when a canary
+    misbehaves and you /rollback: same prompts and routing = same hash, whatever the track label says.
 
-Honest numbers. On the free tier you pay nothing, so every cost here is NOTIONAL: what the same run would cost on a
-paid key, at the list price on the date in data/prices.json. Offline, token counts are estimates (characters / 4),
-so offline costs are estimates of estimates. Only `--live` runs give real token counts.
+WHAT GOES WRONG WITHOUT IT
+    No ceiling: a looping live run spends until the call cap. No routing: every routine step pays the strong model's
+    price. No stamp: two runs that behave differently cannot be told apart in logs/runs.jsonl.
 
-What to look at
-    load_prices(), price_usd()   list prices from data/prices.json (dated, with the source URL), per 1M tokens.
-    CostMeter                    charge() adds one call to the bill; check() enforces the ceiling.
-    ROUTING                      role -> model name. Change it and the version stamp changes with it.
-    version_stamp()              app version, a short hash of every prompt, the model per role, the LangGraph version.
+HONEST LABELS
+    Prices are list prices per 1M tokens, read 2026-11-24 from Google's Gemini API pricing page (research note c2-01).
+    Offline, the stand-in's tokens are estimates (~4 characters per token), so every dollar figure is notional.
+    Free-tier keys are billed $0; these numbers show what the same traffic would cost at list price.
 """
 import hashlib
+import importlib
+import importlib.metadata
 import json
-import os
-from importlib.metadata import version as package_version
 
-from llm import CostCeilingReached
+import llm
 
-APP_VERSION = "1.0.0"
-PRICES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "prices.json")
-CHEAP, STRONG = "gemini-2.5-flash-lite", "gemini-3.5-flash-lite"
-ROUTING = {"agent": STRONG, "planner": STRONG, "reviewer": STRONG,          # judgement: the stronger model
-           "executor": CHEAP, "supervisor": CHEAP, "tasks": CHEAP, "calendar": CHEAP}   # one routing or tool choice: cheap
+# List prices per 1M tokens (notional, read 2026-11-24 from the Gemini API pricing page; re-check before quoting)
+PRICES = {
+    "gemini-2.5-flash-lite": {"in": 0.10, "out": 0.40},
+    "gemini-3.5-flash-lite": {"in": 0.30, "out": 2.50},
+}
+PRICES_CHECKED = "2026-11-24"
 
+# Route routine steps to the cheaper model, judgement steps (planner, reviewer) to the stronger model
+ROUTING = {
+    "single": "gemini-3.5-flash-lite",
+    "supervisor": "gemini-2.5-flash-lite",
+    "executor": "gemini-2.5-flash-lite",
+    "tasks_worker": "gemini-2.5-flash-lite",
+    "calendar_worker": "gemini-2.5-flash-lite",
+    "planner": "gemini-3.5-flash-lite",
+    "reviewer": "gemini-3.5-flash-lite",
+}
 
-def load_prices(path: str = PRICES_PATH) -> dict:
-    """The price file: models with input and output USD per 1M tokens, the source and the date it was read."""
-    with open(path, encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-def price_usd(model: str, input_tokens: int, output_tokens: int, prices: dict) -> float:
-    """What one call costs at list price. An unknown model is priced as the file's fallback model, never as free."""
-    rate = prices["models"].get(model) or prices["models"][prices["fallback"]]
-    return (input_tokens * rate["input"] + output_tokens * rate["output"]) / 1_000_000
+RELEASES = {"stable": "1.0.0", "canary": "1.1.0"}
+PROMPT_MODULES = ("app", "two_agent", "team")   # every *_PROMPT string in these files is part of the hash
 
 
 class CostMeter:
-    """Adds up the notional cost of a run, per role, and stops the run once it passes the ceiling."""
+    """Tracks per-turn notional USD cost and enforces an optional hard ceiling in code."""
 
-    def __init__(self, ceiling_usd: "float | None" = None, prices: "dict | None" = None):
-        """ceiling_usd=None means 'meter, but never stop'."""
-        self.ceiling_usd = ceiling_usd
-        self.prices = prices or load_prices()
-        self.price_date = self.prices.get("read_on", "?")
+    def __init__(self, ceiling: "float | None" = None):
+        self.ceiling = ceiling
         self.total_usd = 0.0
         self.calls = 0
-        self.by_role: dict[str, float] = {}
+        self.in_tokens = 0
+        self.out_tokens = 0
 
-    def charge(self, role: str, reply) -> float:
-        """Add one model reply to the bill and return what it cost. Never raises: check() is the rule."""
-        usd = price_usd(reply.model, reply.input_tokens, reply.output_tokens, self.prices)
+    def charge(self, role: str, reply: llm.Reply) -> float:
+        # Unknown names (e.g. "stand-in" with no routing) are priced as the stronger model: never under-count.
+        rate = PRICES.get(reply.model, PRICES["gemini-3.5-flash-lite"])
+        usd = (reply.input_tokens * rate["in"] + reply.output_tokens * rate["out"]) / 1_000_000.0
         self.total_usd += usd
         self.calls += 1
-        self.by_role[role] = self.by_role.get(role, 0.0) + usd
+        self.in_tokens += reply.input_tokens
+        self.out_tokens += reply.output_tokens
         return usd
 
     def check(self) -> None:
-        """The ceiling: raise CostCeilingReached once the run's total is over it."""
-        if self.ceiling_usd is not None and self.total_usd > self.ceiling_usd:
-            raise CostCeilingReached(f"cost ceiling reached: ${self.total_usd:.6f} is over ${self.ceiling_usd:.6f} (notional)")
+        # llm.ask_json calls this right after every charge, so the turn stops on the call that crossed the line.
+        if self.ceiling is not None and self.total_usd > self.ceiling:
+            raise llm.CostCeilingReached(
+                f"cost ceiling reached: ${self.total_usd:.6f} is over ${self.ceiling:.6f} (notional)"
+            )
 
 
-def prompt_version() -> str:
-    """A short hash of every agent prompt: change one word in any prompt and the stamp changes."""
-    from baseline import AGENT_PROMPT
-    from executor import EXECUTOR_PROMPT
-    from graph import SINGLE_PROMPT
-    from planner import PLANNER_PROMPT
-    from reviewer import REVIEWER_PROMPT
-    from supervisor import SUPERVISOR_PROMPT
-    from workers import WORKER_PROMPT
-    text = "\n".join([AGENT_PROMPT, SINGLE_PROMPT, PLANNER_PROMPT, EXECUTOR_PROMPT, SUPERVISOR_PROMPT, WORKER_PROMPT, REVIEWER_PROMPT])
-    return hashlib.sha256(text.encode()).hexdigest()[:8]
+def _langgraph_version() -> str:
+    try:
+        return importlib.metadata.version("langgraph")
+    except importlib.metadata.PackageNotFoundError:
+        return "not installed"
 
 
-def version_stamp(setup: str, routing: "dict | None" = None) -> dict:
-    """Everything that defines this run's behaviour, small enough to print on every run and every report."""
-    return {"app": APP_VERSION, "setup": setup, "prompts": prompt_version(), "langgraph": package_version("langgraph"),
-            "models": dict(routing if routing is not None else ROUTING)}
+def collect_prompts() -> dict[str, str]:
+    """Every module-level *_PROMPT string in app.py, two_agent.py and team.py (files not built yet are skipped)."""
+    prompts: dict[str, str] = {}
+    for mod_name in PROMPT_MODULES:
+        try:
+            mod = importlib.import_module(mod_name)
+        except ModuleNotFoundError as err:
+            if err.name == mod_name:
+                continue
+            raise
+        for attr in sorted(dir(mod)):
+            value = getattr(mod, attr)
+            if attr.endswith("_PROMPT") and isinstance(value, str):
+                prompts[f"{mod_name}.{attr}"] = value
+    return prompts
+
+
+def version_stamp(setup: str, routing: dict, track: str = "stable") -> dict:
+    """Stamp a run with its release track and an 8-character hash of prompts + routing + setup + LangGraph version.
+
+    The track is shown separately and is NOT in the hash: /rollback changes the label, while the hash only changes
+    when something that drives behaviour changes (a prompt edit, a routing change, a LangGraph upgrade).
+    """
+    clean_track = track if track in RELEASES else "stable"
+    lg_version = _langgraph_version()
+    payload = json.dumps(
+        {"setup": setup, "routing": routing, "langgraph": lg_version, "prompts": collect_prompts()},
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
+    return {
+        "release": RELEASES[clean_track],
+        "track": clean_track,
+        "setup": setup,
+        "prompt_hash": digest,
+        "langgraph": lg_version,
+        "routing": dict(routing),
+    }
